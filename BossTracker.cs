@@ -42,11 +42,13 @@ namespace BossChecklist
 		internal bool BossesFinalized = false;
 		internal bool AnyModHasOldCall = false;
 		internal Dictionary<string, List<string>> OldCalls = new();
+		internal List<string> BossRecordKeys;
 
 		public BossTracker() {
 			BossChecklist.bossTracker = this;
 			InitializeVanillaBosses();
 			ExtraData = new List<OrphanInfo>();
+			BossRecordKeys = new List<string>();
 		}
 
 		private void InitializeVanillaBosses() {
@@ -236,6 +238,13 @@ namespace BossChecklist
 
 		internal void FinalizeBossData() {
 			SortedBosses.Sort((x, y) => x.progression.CompareTo(y.progression));
+			// 
+			for (int i = 0; i < SortedBosses.Count; i++) {
+				if (SortedBosses[i].type == EntryType.Boss)
+					BossRecordKeys.Add(SortedBosses[i].Key);
+			}
+
+			// Bosses are now finalized. Entries can no longer be added or edited through Mod Calls.
 			BossesFinalized = true;
 			if (AnyModHasOldCall) {
 				foreach (var oldCall in OldCalls) {
@@ -244,13 +253,17 @@ namespace BossChecklist
 				OldCalls.Clear();
 				BossChecklist.instance.Logger.Info("Updated Mod.Call documentation for BossChecklist can be found here: https://github.com/JavidPack/BossChecklist/wiki/%5B1.4-alpha%5D-Mod-Call-Structure");
 			}
-			
+
+			// The server must populate for collected records after all bosses have been counted and sorted.
 			if (Main.netMode == NetmodeID.Server) {
-				BossChecklist.ServerCollectedRecords = new List<BossStats>[255];
-				for (int i = 0; i < 255; i++) {
-					BossChecklist.ServerCollectedRecords[i] = new List<BossStats>();
-					for (int j = 0; j < BossChecklist.bossTracker.SortedBosses.Count; j++) {
-						BossChecklist.ServerCollectedRecords[i].Add(new BossStats());
+				BossChecklist.ServerCollectedRecords = new List<BossRecord>[Main.maxPlayers];
+				for (int i = 0; i < Main.maxPlayers; i++) {
+					BossChecklist.ServerCollectedRecords[i] = new List<BossRecord>();
+					foreach (BossInfo info in BossChecklist.bossTracker.SortedBosses) {
+						// Be sure to only populate with Boss type entries as they are the only entries that can have records to begin with
+						if (info.type == EntryType.Boss) {
+							BossChecklist.ServerCollectedRecords[i].Add(new BossRecord(info.Key));
+						}
 					}
 				}
 			}
@@ -988,12 +1001,12 @@ namespace BossChecklist
 			if (!BossChecklist.DebugConfig.ModCallLogVerbose)
 				return;
 			Console.ForegroundColor = ConsoleColor.DarkYellow;
-			Console.Write("<<Boss Checklist>> ");
-			Console.ForegroundColor = ConsoleColor.DarkGray;
+			Console.Write("[Boss Checklist] ");
+			Console.ResetColor();
 			Console.Write("Boss Log entry added: ");
-			Console.ForegroundColor = ConsoleColor.Magenta;
-			Console.Write("[" + mod + "]");
 			Console.ForegroundColor = ConsoleColor.DarkMagenta;
+			Console.Write("[" + mod + "] ");
+			Console.ForegroundColor = ConsoleColor.Magenta;
 			Console.Write(name);
 			Console.WriteLine();
 			Console.ResetColor();

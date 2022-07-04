@@ -385,26 +385,26 @@ namespace BossChecklist
 			lootButton.OnRightDoubleClick += RemoveItem;
 
 			// These will serve as a reservation for our AltPage buttons
-			SubpageButton PrevRecordButton = new SubpageButton(0);
+			SubpageButton PrevRecordButton = new SubpageButton((int)RecordType.PreviousAttempt);
 			PrevRecordButton.OnClick += (a, b) => HandleRecordTypeButton(RecordType.PreviousAttempt);
 			PrevRecordButton.OnRightClick += (a, b) => HandleRecordTypeButton(RecordType.PreviousAttempt, false);
 
-			SubpageButton FirstRecordButton = new SubpageButton(1);
+			SubpageButton FirstRecordButton = new SubpageButton((int)RecordType.FirstRecord);
 			FirstRecordButton.OnClick += (a, b) => HandleRecordTypeButton(RecordType.FirstRecord);
 			FirstRecordButton.OnRightClick += (a, b) => HandleRecordTypeButton(RecordType.FirstRecord, false);
 
-			SubpageButton BestRecordButton = new SubpageButton(2);
+			SubpageButton BestRecordButton = new SubpageButton((int)RecordType.BestRecord);
 			BestRecordButton.OnClick += (a, b) => HandleRecordTypeButton(RecordType.BestRecord);
 			BestRecordButton.OnRightClick += (a, b) => HandleRecordTypeButton(RecordType.BestRecord, false);
 
-			SubpageButton WorldRecordButton = new SubpageButton(3);
+			SubpageButton WorldRecordButton = new SubpageButton((int)RecordType.WorldRecord);
 			WorldRecordButton.OnClick += (a, b) => HandleRecordTypeButton(RecordType.WorldRecord);
 			WorldRecordButton.OnRightClick += (a, b) => HandleRecordTypeButton(RecordType.WorldRecord, false);
 
 			AltPageButtons = new SubpageButton[] {
 				PrevRecordButton,
-				FirstRecordButton,
 				BestRecordButton,
+				FirstRecordButton,
 				WorldRecordButton
 			};
 		}
@@ -621,7 +621,8 @@ namespace BossChecklist
 			}
 			if (BossChecklist.DebugConfig.ResetRecordsBool && CategoryPageNum == 0) {
 				PlayerAssist modPlayer = Main.LocalPlayer.GetModPlayer<PlayerAssist>();
-				BossStats stats = modPlayer.RecordsForWorld[PageNumToRecordIndex(modPlayer.RecordsForWorld)].stat;
+				int recordIndex = BossChecklist.bossTracker.SortedBosses[PageNum].GetRecordIndex;
+				PersonalStats stats = modPlayer.RecordsForWorld[recordIndex].stats;
 				stats.kills = 0;
 				stats.deaths = 0;
 
@@ -635,9 +636,9 @@ namespace BossChecklist
 				if (Main.netMode == NetmodeID.MultiplayerClient) {
 					ModPacket packet = BossChecklist.instance.GetPacket();
 					packet.Write((byte)PacketMessageType.RecordUpdate);
-					packet.Write((int)PageNumToRecordIndex(modPlayer.RecordsForWorld));
+					packet.Write(recordIndex);
 					stats.NetSend(packet, RecordID.ResetAll);
-					packet.Send(toClient: Main.LocalPlayer.whoAmI);
+					packet.Send(toClient: Main.LocalPlayer.whoAmI); // Multiplayer client --> Multiplayer client
 				}
 			}
 		}
@@ -1554,15 +1555,16 @@ namespace BossChecklist
 					bool validRecordPage = CategoryPageNum != CategoryPage.Record || boss.type != EntryType.Boss;
 					if (!validRecordPage) {
 						PlayerAssist modPlayer = Main.LocalPlayer.GetModPlayer<PlayerAssist>();
-						BossStats record = modPlayer.RecordsForWorld[PageNumToRecordIndex(modPlayer.RecordsForWorld)].stat;
+						int recordIndex = BossChecklist.bossTracker.SortedBosses[PageNum].GetRecordIndex;
+						PersonalStats record = modPlayer.RecordsForWorld[recordIndex].stats;
 						int totalRecords = (int)RecordType.None;
 						for (int i = 0; i < totalRecords; i++) {
 							if ((i == 1 || i == 2) && record.kills == 0) {
 								// If a player has no kills against a boss, they can't have a First or Best record, so skip the button creation
 								continue;
 							}
-							AltPageButtons[i].Width.Pixels = 32;
-							AltPageButtons[i].Height.Pixels = 32;
+							AltPageButtons[i].Width.Pixels = 36;
+							AltPageButtons[i].Height.Pixels = 36;
 							if (CategoryPageNum == CategoryPage.Record) {
 								// If First or Best buttons were skipped account for the positioning of Previous and World
 								if (i < 2) {
@@ -1634,9 +1636,6 @@ namespace BossChecklist
 				}
 			}
 		}
-
-		public static int PageNumToRecordIndex(List<BossRecord> records, int bossIndex = -1) => records.FindIndex(x => x.bossKey == BossChecklist.bossTracker.SortedBosses[bossIndex == -1 ? PageNum : bossIndex].Key);
-		public static int PageNumToRecordIndex(List<WorldRecord> records, int bossIndex = -1) => records.FindIndex(x => x.bossKey == BossChecklist.bossTracker.SortedBosses[bossIndex == -1 ? PageNum : bossIndex].Key);
 
 		public static int FindNext(EntryType entryType) => BossChecklist.bossTracker.SortedBosses.FindIndex(x => !x.IsDownedOrForced && x.available() && !x.hidden && x.type == entryType);
 		

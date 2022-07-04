@@ -15,6 +15,16 @@ namespace BossChecklist
 	{
 		// Since only 1 set of records is saved per boss, there is no need to put it into a dictionary.
 		public static List<WorldRecord> worldRecords;
+
+		// Bosses will be set to true when they spawn and will only be set back to false when the boss despawns or dies
+		public static bool[] Tracker_ActiveEntry;
+
+		// Players that are in the server when a boss fight starts
+		// Prevents players that join a server mid bossfight from messing up records
+		public static List<bool[]> Tracker_StartingPlayers;
+
+		public static bool[] CheckedRecordIndexes;
+
 		public static HashSet<string> HiddenBosses = new HashSet<string>();
 
 		public static bool downedBloodMoon;
@@ -30,13 +40,6 @@ namespace BossChecklist
 		public static bool downedInvasionT2Ours;
 		public static bool downedInvasionT3Ours;
 		public static bool downedTorchGod;
-
-		// Bosses will be set to true when they spawn and will only be set back to false when the boss despawns or dies
-		public static List<bool> ActiveBossesList;
-
-		// Players that are in the server when a boss fight starts
-		// Prevents players that join a server mid bossfight from messing up records
-		public static List<bool[]> StartingPlayers;
 
 		bool isBloodMoon = false;
 		bool isPumpkinMoon = false;
@@ -56,12 +59,6 @@ namespace BossChecklist
 		}
 
 		public override void OnWorldLoad() {
-			worldRecords = new List<WorldRecord>();
-			foreach (BossInfo boss in BossChecklist.bossTracker.SortedBosses) {
-				if (boss.type == EntryType.Boss)
-					worldRecords.Add(new WorldRecord(boss.Key));
-			}
-
 			HiddenBosses.Clear();
 
 			downedBloodMoon = false;
@@ -83,39 +80,45 @@ namespace BossChecklist
 			downedInvasionT3Ours = false;
 			downedTorchGod = false;
 
-			ActiveBossesList = new List<bool>();
-			StartingPlayers = new List<bool[]>();
-			// Includes events, even though they wont be accounted for
-			for (int i = 0; i < BossChecklist.bossTracker.SortedBosses.Count; i++) {
-				ActiveBossesList.Add(false);
-				StartingPlayers.Add(new bool[Main.maxPlayers]);
+			// Record related lists that should be the same count of record tracking entries
+			worldRecords = new List<WorldRecord>();
+			CheckedRecordIndexes = new bool[BossChecklist.bossTracker.BossRecordKeys.Count];
+			Tracker_ActiveEntry = new bool[BossChecklist.bossTracker.BossRecordKeys.Count];
+			Tracker_StartingPlayers = new List<bool[]>();
+			foreach (string key in BossChecklist.bossTracker.BossRecordKeys) {
+				worldRecords.Add(new WorldRecord(key));
+				Tracker_StartingPlayers.Add(new bool[Main.maxPlayers]);
 			}
 		}
 
 		public override void PreUpdateWorld() {
-			if (BossChecklist.DebugConfig.DISABLERECORDTRACKINGCODE) {
+			if (BossChecklist.DebugConfig.DISABLERECORDTRACKINGCODE)
 				return;
-			}
-			for (int n = 0; n < Main.maxNPCs; n++) {
-				NPC npc = Main.npc[n];
-				int listNum = NPCAssist.GetBossInfoIndex(npc);
-				if (listNum == -1) {
-					continue;
-				}
 
-				if (ActiveBossesList[listNum]) {
-					// If any players become inactive during the fight, remove them from the list
+			foreach (NPC npc in Main.npc) {
+				int bossIndex = NPCAssist.GetBossInfoIndex(npc.type, true);
+				if (bossIndex == -1)
+					continue;
+				int recordIndex = BossChecklist.bossTracker.SortedBosses[bossIndex].GetRecordIndex;
+				if (recordIndex == -1 || CheckedRecordIndexes[recordIndex])
+					continue;
+
+				// Prevents checking and updating NPCs within the same entry npc pool for performance
+				CheckedRecordIndexes[recordIndex] = true;
+
+				// If marked as active...
+				if (Tracker_ActiveEntry[recordIndex]) {
+					// ...remove any players that become inactive during the fight
 					for (int i = 0; i < Main.maxPlayers; i++) {
 						if (!Main.player[i].active) {
-							StartingPlayers[listNum][i] = false;
+							Tracker_StartingPlayers[recordIndex][i] = false;
 						}
 					}
 
-					// If the boss is marked active, but is no longer active, check for other potential npcs assigned to the boss
-					// If the boss is fully inactive, but not killed, display a despawn message
-					if (!npc.active && NPCAssist.FullyInactive(npc, listNum)) {
-						ActiveBossesList[listNum] = false; // No longer an active boss (only other time this is set to false is NPC.OnKill)
-						string message = GetDespawnMessage(npc, listNum);
+					// ...check if the npc is actually still active or not and display a despawn message if they are no longer active (but not killed!)
+					if (NPCAssist.FullyInactive(npc, bossIndex, true)) {
+						Tracker_ActiveEntry[recordIndex] = false; // No longer an active boss (only other time this is set to false is NPC.OnKill)
+						string message = NPCAssist.GetDespawnMessage(npc, bossIndex);
 						if (message != "") {
 							if (Main.netMode == NetmodeID.SinglePlayer) {
 								Main.NewText(Language.GetTextValue(message, npc.FullName), Colors.RarityPurple);
@@ -126,6 +129,10 @@ namespace BossChecklist
 						}
 					}
 				}
+			}
+			// Resets all to false
+			for (int i = 0; i < CheckedRecordIndexes.Length; i++) {
+				CheckedRecordIndexes[i] = false;
 			}
 		}
 
@@ -204,31 +211,6 @@ namespace BossChecklist
 			}
 		}
 
-		public string GetDespawnMessage(NPC npc, int index) {
-			if (npc.life <= 0) {
-				return ""; // If the boss was killed, don't display a despawn message
-			}
-
-			List<BossInfo> bosses = BossChecklist.bossTracker.SortedBosses;
-			string messageType = BossChecklist.ClientConfig.DespawnMessageType;
-
-			if (messageType == "Unique") {
-				// Provide the npc for the custom message
-				// If null or empty, give a generic message instead of a custom one
-				string customMessage = bosses[index].customDespawnMessages(npc);
-				if (!string.IsNullOrEmpty(customMessage)) {
-					return customMessage;
-				}
-			}
-			if (messageType != "Disabled") {
-				// If any player is still alive, use the generic despawn message.
-				// If all players are dead, use the boss victory despawn message.
-				return Main.player.Any(plr => plr.active && !plr.dead) ? "Mods.BossChecklist.BossDespawn.Generic" : "Mods.BossChecklist.BossVictory.Generic";
-			}
-			// The despawn message feature was disabled. Return an empty message.
-			return "";
-		}
-
 		public override void SaveWorldData(TagCompound tag) {
 			var HiddenBossesList = new List<string>(HiddenBosses);
 
@@ -258,6 +240,7 @@ namespace BossChecklist
 
 			tag["downed"] = downed;
 			tag["HiddenBossesList"] = HiddenBossesList;
+			// TODO: unloaded entry data must be preserved
 			if (worldRecords == null) {
 				tag["Records"] = new List<WorldRecord>();
 			}

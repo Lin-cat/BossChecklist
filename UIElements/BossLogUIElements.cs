@@ -189,7 +189,6 @@ namespace BossChecklist.UIElements
 				Main.inventoryScale = scale;
 				Rectangle rectangle = GetInnerDimensions().ToRectangle();
 				// Make backups of the original itemslot textures, as we will replace them temporarily for our visuals
-				var backup = TextureAssets.InventoryBack6;
 				var backup2 = TextureAssets.InventoryBack7;
 
 				BossInfo selectedBoss = BossChecklist.bossTracker.SortedBosses[BossLogUI.PageNum];
@@ -217,6 +216,7 @@ namespace BossChecklist.UIElements
 				if (maskedItems && !selectedBoss.IsDownedOrForced && Id.StartsWith("loot_")) {
 					item.color = Color.Black;
 					ItemSlot.Draw(spriteBatch, ref item, context, rectangle.TopLeft());
+					TextureAssets.InventoryBack7 = backup2; // Set the itemslot textures back to their original state
 					string hoverText = Language.GetTextValue("Mods.BossChecklist.BossLog.HoverText.MaskedItems", selectedBoss.DisplayName);
 					Rectangle rect2 = new Rectangle(rectangle.X + rectangle.Width / 2, rectangle.Y + rectangle.Height / 2, 32, 32);
 					if ((item.expert || item.expertOnly) && !Main.expertMode) {
@@ -233,12 +233,11 @@ namespace BossChecklist.UIElements
 					return;
 				}
 				else if (item.type != ItemID.None || hoverText == demonAltar || hoverText == crimsonAltar) {
+					if (item.color == Color.Black)
+						item.color = default;
 					ItemSlot.Draw(spriteBatch, ref item, context, rectangle.TopLeft());
+					TextureAssets.InventoryBack7 = backup2; // Set the itemslot textures back to their original state
 				}
-
-				// Set the itemslot textures back to their original state
-				TextureAssets.InventoryBack6 = backup;
-				TextureAssets.InventoryBack7 = backup2;
 
 				// Draw evil altars if needed
 				if (hoverText == crimsonAltar || hoverText == demonAltar) {
@@ -672,6 +671,7 @@ namespace BossChecklist.UIElements
 												// Reset UI positions when changing the page
 												BossLogUI.PageNum = BossChecklist.bossTracker.SortedBosses.FindIndex(x => x.Key == info.Key);
 												BossUISystem.Instance.BossLog.ResetUIPositioning();
+												// TODO: does this need to return??
 											}
 										}
 									}
@@ -686,8 +686,9 @@ namespace BossChecklist.UIElements
 								return;
 							}
 
-							BossStats record = modPlayer.RecordsForWorld[BossLogUI.PageNumToRecordIndex(modPlayer.RecordsForWorld)].stat;
-							WorldStats wldRecord = WorldAssist.worldRecords[BossLogUI.PageNumToRecordIndex(WorldAssist.worldRecords)].stat;
+							int recordIndex = BossChecklist.bossTracker.SortedBosses[BossLogUI.PageNum].GetRecordIndex;
+							PersonalStats record = modPlayer.RecordsForWorld[recordIndex].stats;
+							WorldStats wldRecord = WorldAssist.worldRecords[recordIndex].stats;
 
 							string recordTitle = "";
 							string recordValue = "";
@@ -777,11 +778,11 @@ namespace BossChecklist.UIElements
 									}
 									else if (BossLogUI.RecordPageSelected == RecordType.FirstRecord) {
 										// First Victory
-										if (record.durationFirs == -1) {
+										if (record.durationFirst == -1) {
 											recordValue = Language.GetTextValue("Mods.BossChecklist.BossLog.Terms.NoRecord");
 										}
 										else {
-											recordValue = RecordTimeConversion(record.durationFirs);
+											recordValue = RecordTimeConversion(record.durationFirst);
 										}
 									}
 									else if (BossLogUI.RecordPageSelected == RecordType.BestRecord) {
@@ -820,11 +821,11 @@ namespace BossChecklist.UIElements
 									}
 									else if (BossLogUI.RecordPageSelected == RecordType.FirstRecord) {
 										// First Victory
-										if (record.hitsTakenFirs == -1) {
+										if (record.hitsTakenFirst == -1) {
 											recordValue = Language.GetTextValue("Mods.BossChecklist.BossLog.Terms.NoRecord");
 										}
 										else {
-											recordValue = record.hitsTakenFirs.ToString();
+											recordValue = record.hitsTakenFirst.ToString();
 										}
 									}
 									else if (BossLogUI.RecordPageSelected == RecordType.BestRecord) {
@@ -883,21 +884,42 @@ namespace BossChecklist.UIElements
 									}
 
 									// Draw trophies hoverover for World Record holder names
-									if (BossLogUI.RecordPageSelected == RecordType.WorldRecord && (recordSlot == 2 || recordSlot == 3)) {
-										Asset<Texture2D> trophy = Main.Assets.Request<Texture2D>($"Images/Item_{ItemID.GolfTrophyGold}", AssetRequestMode.ImmediateLoad);
-										Vector2 trophyPos = new Vector2(slotPos.X + slot.Value.Width - trophy.Value.Width / 2, slotPos.Y + slot.Value.Height / 2 - trophy.Value.Height / 2);
-										spriteBatch.Draw(trophy.Value, trophyPos, Color.White);
+									if (recordSlot == 2 || recordSlot == 3) {
+										if (BossLogUI.RecordPageSelected == RecordType.WorldRecord && (recordSlot == 2 || recordSlot == 3)) {
+											Asset<Texture2D> trophy = Main.Assets.Request<Texture2D>($"Images/Item_{ItemID.GolfTrophyGold}", AssetRequestMode.ImmediateLoad);
+											Vector2 trophyPos = new Vector2(slotPos.X + slot.Value.Width - trophy.Value.Width / 2, slotPos.Y + slot.Value.Height / 2 - trophy.Value.Height / 2);
+											spriteBatch.Draw(trophy.Value, trophyPos, Color.White);
 
-										string message = "$Mods.BossChecklist.BossLog.HoverText.ClaimRecord";
-										if (BossLogUI.MouseIntersects(trophyPos.X, trophyPos.Y, trophy.Value.Width, trophy.Value.Height)) {
-											string holderText = Language.GetTextValue("Mods.BossChecklist.BossLog.Terms.RecordHolder");
-											if (recordSlot == 2 && !string.IsNullOrEmpty(wldRecord.durationHolder)) {
-												message = $"{holderText}\n" + wldRecord.durationHolder;
+											string message = "$Mods.BossChecklist.BossLog.HoverText.ClaimRecord";
+											if (BossLogUI.MouseIntersects(trophyPos.X, trophyPos.Y, trophy.Value.Width, trophy.Value.Height)) {
+												string holderText = Language.GetTextValue("Mods.BossChecklist.BossLog.Terms.RecordHolder");
+												if (recordSlot == 2 && !string.IsNullOrEmpty(wldRecord.durationHolder)) {
+													message = $"{holderText}\n" + wldRecord.durationHolder;
+												}
+												else if (recordSlot == 3 && !string.IsNullOrEmpty(wldRecord.hitsTakenHolder)) {
+													message = $"{holderText}\n" + wldRecord.hitsTakenHolder;
+												}
+												BossUISystem.Instance.UIHoverText = message;
 											}
-											else if (recordSlot == 3 && !string.IsNullOrEmpty(wldRecord.hitsTakenHolder)) {
-												message = $"{holderText}\n" + wldRecord.hitsTakenHolder;
+										}
+										else if (BossLogUI.RecordPageSelected == RecordType.BestRecord) {
+											Asset<Texture2D> trophy = Main.Assets.Request<Texture2D>($"Images/Item_{ItemID.GolfTrophySilver}", AssetRequestMode.ImmediateLoad);
+											Vector2 trophyPos = new Vector2(slotPos.X + slot.Value.Width - trophy.Value.Width / 2, slotPos.Y + slot.Value.Height / 2 - trophy.Value.Height / 2);
+											spriteBatch.Draw(trophy.Value, trophyPos, Color.White);
+
+											// TODO: Localization needed
+											// TODO: Implement the functionality of Previous Best Records
+											string message = "Your previous best";
+											if (BossLogUI.MouseIntersects(trophyPos.X, trophyPos.Y, trophy.Value.Width, trophy.Value.Height)) {
+												string holderText = Language.GetTextValue("Mods.BossChecklist.BossLog.Terms.RecordHolder");
+												if (recordSlot == 2 && !string.IsNullOrEmpty(wldRecord.durationHolder)) {
+													message = $"{holderText}\n" + wldRecord.durationHolder;
+												}
+												else if (recordSlot == 3 && !string.IsNullOrEmpty(wldRecord.hitsTakenHolder)) {
+													message = $"{holderText}\n" + wldRecord.hitsTakenHolder;
+												}
+												BossUISystem.Instance.UIHoverText = message;
 											}
-											BossUISystem.Instance.UIHoverText = message;
 										}
 									}
 
@@ -1152,21 +1174,19 @@ namespace BossChecklist.UIElements
 					}
 
 					if (Id == "PageTwo" && BossLogUI.CategoryPageNum == CategoryPage.Loot) {
-						if (BossLogUI.RecordPageSelected == RecordType.PreviousAttempt) {
-							// Loot Table Subpage
-							Asset<Texture2D> bagTexture;
-							if (selectedBoss.treasureBag != 0) {
-								Main.instance.LoadItem(selectedBoss.treasureBag);
-								bagTexture = TextureAssets.Item[selectedBoss.treasureBag];
-							}
-							else {
-								bagTexture = ModContent.Request<Texture2D>("BossChecklist/Resources/Extra_TreasureBag", AssetRequestMode.ImmediateLoad);
-							}
-							DrawAnimation drawAnim = Main.itemAnimations[selectedBoss.treasureBag]; // 0 is null
-							Rectangle srcRect = drawAnim != null ? srcRect = drawAnim.GetFrame(bagTexture.Value) : bagTexture.Value.Bounds;
-							Rectangle posRect = new Rectangle(pageRect.X + (pageRect.Width / 2) - 5 - (bagTexture.Width() / 2), pageRect.Y + 88, srcRect.Width, srcRect.Height);
-							spriteBatch.Draw(bagTexture.Value, posRect, srcRect, Color.White);
+						// Loot Table Subpage
+						Asset<Texture2D> bagTexture;
+						if (selectedBoss.treasureBag != 0) {
+							Main.instance.LoadItem(selectedBoss.treasureBag);
+							bagTexture = TextureAssets.Item[selectedBoss.treasureBag];
 						}
+						else {
+							bagTexture = ModContent.Request<Texture2D>("BossChecklist/Resources/Extra_TreasureBag", AssetRequestMode.ImmediateLoad);
+						}
+						DrawAnimation drawAnim = Main.itemAnimations[selectedBoss.treasureBag]; // 0 is null
+						Rectangle srcRect = drawAnim != null ? srcRect = drawAnim.GetFrame(bagTexture.Value) : bagTexture.Value.Bounds;
+						Rectangle posRect = new Rectangle(pageRect.X + (pageRect.Width / 2) - 5 - (bagTexture.Width() / 2), pageRect.Y + 88, srcRect.Width, srcRect.Height);
+						spriteBatch.Draw(bagTexture.Value, posRect, srcRect, Color.White);
 					}
 				}
 			}
@@ -1185,8 +1205,9 @@ namespace BossChecklist.UIElements
 
 			public int GetRecordValue(RecordType type, RecordID id) {
 				PlayerAssist modPlayer = Main.LocalPlayer.GetModPlayer<PlayerAssist>();
-				BossStats records = modPlayer.RecordsForWorld[BossLogUI.PageNumToRecordIndex(modPlayer.RecordsForWorld)].stat;
-				WorldStats worldRecords = WorldAssist.worldRecords[BossLogUI.PageNumToRecordIndex(WorldAssist.worldRecords)].stat;
+				int recordIndex = BossChecklist.bossTracker.SortedBosses[BossLogUI.PageNum].GetRecordIndex;
+				PersonalStats records = modPlayer.RecordsForWorld[recordIndex].stats;
+				WorldStats worldRecords = WorldAssist.worldRecords[recordIndex].stats;
 				if (id == RecordID.None || id == RecordID.ResetAll) {
 					return -1;
 				}
@@ -1195,7 +1216,7 @@ namespace BossChecklist.UIElements
 					return id == RecordID.Duration ? records.durationPrev : records.hitsTakenPrev;
 				}
 				else if (type == RecordType.FirstRecord) {
-					return id == RecordID.Duration ? records.durationFirs : records.hitsTakenFirs;
+					return id == RecordID.Duration ? records.durationFirst : records.hitsTakenFirst;
 				}
 				else if (type == RecordType.BestRecord) {
 					return id == RecordID.Duration ? records.durationBest : records.hitsTakenBest;
@@ -1782,14 +1803,14 @@ namespace BossChecklist.UIElements
 					spriteBatch.DrawString(FontAssets.MouseText.Value, translated, pos, Color.Gold);
 				}
 
-				Rectangle exclamPos = new Rectangle((int)GetInnerDimensions().X - 12, (int)GetInnerDimensions().Y - 12, 32, 32);
+				Rectangle exclamPos = new Rectangle((int)GetInnerDimensions().X - 12, (int)GetInnerDimensions().Y - 12, 36, 36);
 
 				if (AltButtonNum >= 0) {
 					if (BossLogUI.CategoryPageNum == CategoryPage.Record) {
 						string[] hoverTexts = {
 							Language.GetTextValue("Mods.BossChecklist.BossLog.Terms.PreviousRecord"),
-							Language.GetTextValue("Mods.BossChecklist.BossLog.Terms.FirstRecord"),
 							Language.GetTextValue("Mods.BossChecklist.BossLog.Terms.BestRecord"),
+							Language.GetTextValue("Mods.BossChecklist.BossLog.Terms.FirstRecord"),
 							Language.GetTextValue("Mods.BossChecklist.BossLog.Terms.WorldRecord")
 						};
 
@@ -1803,11 +1824,12 @@ namespace BossChecklist.UIElements
 						}
 
 						Asset<Texture2D> texture = ModContent.Request<Texture2D>("BossChecklist/Resources/Extra_RecordTabs", AssetRequestMode.ImmediateLoad);
-						Rectangle exclamCut = new Rectangle(32 * AltButtonNum, 32 * selected, 32, 32);
+						Rectangle exclamCut = new Rectangle(36 * AltButtonNum, 36 * selected, 36, 36);
 						spriteBatch.Draw(texture.Value, exclamPos, exclamCut, Color.White);
 
 						if (IsMouseHovering) {
 							BossUISystem.Instance.UIHoverText = hoverTexts[AltButtonNum];
+							BossUISystem.Instance.UIHoverTextColor = Colors.RarityGreen;
 						}
 					}
 					else if (BossLogUI.CategoryPageNum == CategoryPage.Spawn) {

@@ -15,6 +15,8 @@ namespace BossChecklist
 		// When players jon a different world, the boss log PageNum should reset back to its original state
 		public bool enteredWorldReset;
 
+		public bool TrackersSetup;
+
 		// Records are bound to characters, but records are independent between worlds as well.
 		// AllStored records contains every player record from every world
 		// RecordsForWorld is a reference to the specfic player records of the current world
@@ -29,14 +31,15 @@ namespace BossChecklist
 		public List<string> ForceDownsForWorld;
 
 		// The 'in progress' values for records. This is what is updated during boss fights.
-		public List<int> Tracker_Duration;
-		public List<int> Tracker_HitsTaken;
-		public List<bool> Tracker_Deaths;
+		public int[] Tracker_Duration;
+		public int[] Tracker_HitsTaken;
+		public bool[] Tracker_Deaths;
 		public List<bool> hasNewRecord;
 
 		public override void Initialize() {
 			hasOpenedTheBossLog = false;
 			enteredWorldReset = false;
+			TrackersSetup = false;
 
 			AllStoredRecords = new Dictionary<string, List<BossRecord>>();
 			RecordsForWorld = new List<BossRecord>();
@@ -49,9 +52,9 @@ namespace BossChecklist
 			}
 
 			// For being able to complete records in Multiplayer
-			Tracker_Duration = new List<int>();
-			Tracker_Deaths = new List<bool>();
-			Tracker_HitsTaken = new List<int>();
+			Tracker_Duration = System.Array.Empty<int>();
+			Tracker_Deaths = System.Array.Empty<bool>();
+			Tracker_HitsTaken = System.Array.Empty<int>();
 
 			// Has to contain all entries, even if they arent a boss //TODO: maybe look into again at some point, for now its fine.
 			hasNewRecord = new List<bool>();
@@ -61,6 +64,12 @@ namespace BossChecklist
 		}
 
 		public override void SaveData(TagCompound tag) {
+			// Every time player data is saved, the RecordsForWorld list should be resubmitted into AllStoredRecords to properly update them
+			string WorldID = Main.ActiveWorldFileData.UniqueId.ToString();
+			if (AllStoredRecords.ContainsKey(WorldID)) {
+				AllStoredRecords[WorldID] = RecordsForWorld;
+			}
+
 			// We cannot save dictionaries, so we'll convert it to a TagCompound instead
 			TagCompound TempRecords = new TagCompound();
 			foreach (KeyValuePair<string, List<BossRecord>> bossRecord in AllStoredRecords) {
@@ -123,39 +132,37 @@ namespace BossChecklist
 				}
 			}
 
-			// Upon entering a world, determine if records already exist for a player and copy them into a variable.
+			// Upon entering a world, determine if records already exist for a player and copy them into 'RecordsForWorld'
+			RecordsForWorld.Clear(); // The list must be cleared first, otherwise the list will contain items from previously entered worlds
 			string WorldID = Main.ActiveWorldFileData.UniqueId.ToString();
-			if (AllStoredRecords.ContainsKey(WorldID) && AllStoredRecords.TryGetValue(WorldID, out RecordsForWorld)) {
-				foreach (BossInfo boss in BossChecklist.bossTracker.SortedBosses) {
-					// If we added mod bosses since we last generated this, be sure to add them
-					if (!RecordsForWorld.Exists(x => x.bossKey == boss.Key) && boss.type == EntryType.Boss) {
-						RecordsForWorld.Add(new BossRecord(boss.Key));
-					}
+			if (AllStoredRecords.TryGetValue(WorldID, out List<BossRecord> tempRecords)) {
+				for (int i = 0; i < BossChecklist.bossTracker.BossRecordKeys.Count; i++) {
+					// If the index was found, copy it to our list
+					// Otherwise the index must be invalid so a new entry must be created
+					int grabIndex = tempRecords.FindIndex(x => x.bossKey == BossChecklist.bossTracker.BossRecordKeys[i]);
+					if (grabIndex != -1)
+						RecordsForWorld.Add(tempRecords[grabIndex]);
+					else
+						RecordsForWorld.Add(new BossRecord(BossChecklist.bossTracker.BossRecordKeys[i]));
 				}
 			}
 			else {
-				// If records dont exist (player is new to the world) create a new entry for the player to use.
-				RecordsForWorld = new List<BossRecord>();
-				foreach (BossInfo boss in BossChecklist.bossTracker.SortedBosses) {
-					// Skip any entries that aren't a boss
-					if (boss.type == EntryType.Boss) {
-						RecordsForWorld.Add(new BossRecord(boss.Key));
-					}
+				// If personal records do not exist for this world, create a new entry for the player to use
+				foreach (string key in BossChecklist.bossTracker.BossRecordKeys) {
+					RecordsForWorld.Add(new BossRecord(key));
 				}
+				// A new entry will be added to AllStoredRecords so that it can be saved when needed
 				AllStoredRecords.Add(WorldID, RecordsForWorld);
 			}
 
-			// Reset record tracker numbers
+			// Reset record tracker numbers. Has to be reset after entering a world.
 			// Add values to all record trackers after RecordsForWorld are determined
-			Tracker_Duration = new List<int>();
-			Tracker_Deaths = new List<bool>();
-			Tracker_HitsTaken = new List<int>();
+			Tracker_Duration = new int[BossChecklist.bossTracker.BossRecordKeys.Count];
+			Tracker_Deaths = new bool[BossChecklist.bossTracker.BossRecordKeys.Count];
+			Tracker_HitsTaken = new int[BossChecklist.bossTracker.BossRecordKeys.Count];
 
-			foreach (BossRecord boss in RecordsForWorld) {
-				Tracker_Duration.Add(0);
-				Tracker_Deaths.Add(false);
-				Tracker_HitsTaken.Add(0);
-			}
+			// Trackers are set up // TODO: Does this need to be reset?
+			TrackersSetup = true;
 
 			// If the player has not been in this world before, create an entry for this world
 			if (!AllStoredForceDowns.ContainsKey(WorldID)) {
@@ -168,73 +175,73 @@ namespace BossChecklist
 				return;
 			}
 
-			// Send the player's world-bound records to the server. The server doesn't need player records from every world.
+			// When a player joins a world, their Records will need to be sent to the server
+			// The server doesn't need player records from every world, just the current one
 			if (Main.netMode == NetmodeID.MultiplayerClient) {
-				// Essentially to get "BossAssist.ServerCollectedRecords[player.whoAmI] = AllBossRecords;"
 				ModPacket packet = Mod.GetPacket();
 				packet.Write((byte)PacketMessageType.SendRecordsToServer);
+				packet.Write(RecordsForWorld.Count);
 				for (int i = 0; i < RecordsForWorld.Count; i++) {
-					BossStats stat = RecordsForWorld[i].stat;
-					packet.Write(stat.kills);
-					packet.Write(stat.deaths);
+					// Only records that we need to compare between other players are needed
+					// The statisctics and First recrods are strictly personal with no comparing involved
+					PersonalStats stat = RecordsForWorld[i].stats;
+					packet.Write(RecordsForWorld[i].bossKey);
 					packet.Write(stat.durationBest);
 					packet.Write(stat.durationPrev);
 					packet.Write(stat.hitsTakenBest);
 					packet.Write(stat.hitsTakenPrev);
 				}
-				packet.Send(); // To server
+				packet.Send(); // Multiplayer client --> Server
 			}
 		}
 
-		// Continually track the duration of boss fights while boss NPCs are active.
-		// If a player dies at any point while a boss is active, add to the death tracker for later.
+		// Continually track the duration of boss fights while boss NPCs are active
+		// If a player dies at any point while a boss is active, add to the death tracker for later
 		public override void PreUpdate() {
 			if (BossChecklist.DebugConfig.DISABLERECORDTRACKINGCODE) {
 				return;
 			}
 			if (!BossChecklist.DebugConfig.RecordTrackingDisabled && Main.netMode != NetmodeID.Server) {
-				for (int listNum = 0; listNum < BossChecklist.bossTracker.SortedBosses.Count; listNum++) {
-					if (WorldAssist.ActiveBossesList.Count == 0 || !WorldAssist.ActiveBossesList[listNum]) {
-						continue;
-					}
-					else if (WorldAssist.StartingPlayers[listNum][Main.myPlayer]) {
+				for (int recordIndex = 0; recordIndex < BossChecklist.bossTracker.BossRecordKeys.Count; recordIndex++) {
+					// If a boss is marked active and this player is a 'starting player'
+					if (WorldAssist.Tracker_ActiveEntry[recordIndex] && WorldAssist.Tracker_StartingPlayers[recordIndex][Main.myPlayer]) {
 						if (Player.dead) {
-							Tracker_Deaths[BossLogUI.PageNumToRecordIndex(RecordsForWorld, listNum)] = true;
+							Tracker_Deaths[recordIndex] = true;
 						}
-						Tracker_Duration[BossLogUI.PageNumToRecordIndex(RecordsForWorld, listNum)]++;
+						Tracker_Duration[recordIndex]++;
 					}
 				}
 			}
 		}
 
-		// When a player is dead they are marked as such in the Death tracker.
-		// On respawn, add to the total deaths towards marked bosses.
+		// When a player is dead they are marked as such in the Death tracker
+		// On respawn, add to the total deaths towards marked bosses
+		// ActiveBossesList and StartingPlayers doesn't need to be checked since it was checked when setting the tracker bool to true
 		public override void OnRespawn(Player player) {
 			if (BossChecklist.DebugConfig.DISABLERECORDTRACKINGCODE) {
 				return;
 			}
 			if (!BossChecklist.DebugConfig.RecordTrackingDisabled) {
-				for (int i = 0; i < Tracker_Deaths.Count; i++) {
-					if (Tracker_Deaths[i]) {
-						Tracker_Deaths[i] = false;
-						RecordsForWorld[i].stat.deaths++;
-						WorldAssist.worldRecords[i].stat.totalDeaths++;
+				for (int recordIndex = 0; recordIndex < Tracker_Deaths.Length; recordIndex++) {
+					if (Tracker_Deaths[recordIndex]) {
+						Tracker_Deaths[recordIndex] = false;
+						RecordsForWorld[recordIndex].stats.deaths++;
+						WorldAssist.worldRecords[recordIndex].stats.totalDeaths++;
 					}
 				}
 			}
 		}
 
-		// Whenever the player is hurt, add to the HitsTaken tracker.
+		// Whenever the player is hurt, add to the HitsTaken tracker
 		public override void Hurt(bool pvp, bool quiet, double damage, int hitDirection, bool crit) {
 			if (BossChecklist.DebugConfig.DISABLERECORDTRACKINGCODE) {
 				return;
 			}
 			if (!BossChecklist.DebugConfig.RecordTrackingDisabled && damage > 0) {
-				for (int i = 0; i < Main.maxNPCs; i++) {
-					if (!Main.npc[i].active || NPCAssist.GetBossInfoIndex(Main.npc[i]) == -1) {
-						continue;
+				for (int recordIndex = 0; recordIndex < BossChecklist.bossTracker.BossRecordKeys.Count; recordIndex++) {
+					if (WorldAssist.Tracker_ActiveEntry[recordIndex] && WorldAssist.Tracker_StartingPlayers[recordIndex][Main.myPlayer]) {
+						Tracker_HitsTaken[recordIndex]++;
 					}
-					Tracker_HitsTaken[BossLogUI.PageNumToRecordIndex(RecordsForWorld, NPCAssist.GetBossInfoIndex(Main.npc[i]))]++;
 				}
 			}
 		}
