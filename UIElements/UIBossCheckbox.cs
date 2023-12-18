@@ -18,11 +18,11 @@ namespace BossChecklist.UIElements
 		internal UICheckbox checkbox;
 		internal UIHoverImageButton moreInfo;
 		internal bool expanded;
-		internal BossInfo boss;
+		internal EntryInfo boss;
 		private float descriptionHeight = 18;
 		private int bossIndex { get; }
 
-		public UIBossCheckbox(BossInfo boss) {
+		public UIBossCheckbox(EntryInfo boss) {
 			this.boss = boss;
 			Width = StyleDimension.Fill;
 			Height.Pixels = 15;
@@ -38,18 +38,18 @@ namespace BossChecklist.UIElements
 			//checkbox.spawnItemID = boss.spawnItemID;
 			Append(checkbox);
 
-			moreInfo = new UIHoverImageButton(ModContent.Request<Texture2D>("BossChecklist/UIElements/info"), "More Info");
+			moreInfo = new UIHoverImageButton(ModContent.Request<Texture2D>("BossChecklist/UIElements/info", ReLogic.Content.AssetRequestMode.ImmediateLoad), "More Info");
 			moreInfo.Left.Set(-24, 1f);
 			moreInfo.SetVisibility(1f, 0.7f);
 			moreInfo.OnClick += MoreInfo_OnClick;
-			bossIndex = BossChecklist.bossTracker.SortedBosses.IndexOf(boss);
+			bossIndex = boss.GetIndex;
 
 			OnClick += Box_OnClick;
 		}
 
 		private void MoreInfo_OnClick(UIMouseEvent evt, UIElement listeningElement) {
 			BossUISystem.Instance.BossLog.ToggleBossLog(true);
-			BossUISystem.Instance.BossLog.JumpToBossPage(bossIndex);
+			BossUISystem.Instance.BossLog.PageNum = bossIndex;
 		}
 
 		private void Box_OnClick(UIMouseEvent evt, UIElement listeningElement) {
@@ -58,11 +58,13 @@ namespace BossChecklist.UIElements
 			if (Main.keyState.IsKeyDown(Keys.LeftAlt) || Main.keyState.IsKeyDown(Keys.RightAlt)) {
 				boss.hidden = !boss.hidden;
 				if (boss.hidden)
-					WorldAssist.HiddenBosses.Add(boss.Key);
+					WorldAssist.HiddenEntries.Add(boss.Key);
 				else
-					WorldAssist.HiddenBosses.Remove(boss.Key);
+					WorldAssist.HiddenEntries.Remove(boss.Key);
 				BossUISystem.Instance.bossChecklistUI.UpdateCheckboxes();
-				if (BossChecklist.BossLogConfig.HideUnavailable) BossUISystem.Instance.BossLog.UpdateTableofContents();
+				if (BossChecklist.BossLogConfig.HideUnavailable) {
+					BossUISystem.Instance.BossLog.PageNum = BossLogUI.Page_TableOfContents;
+				}
 				if (Main.netMode == NetmodeID.MultiplayerClient) {
 					ModPacket packet = BossChecklist.instance.GetPacket();
 					packet.Write((byte)PacketMessageType.RequestHideBoss);

@@ -13,19 +13,22 @@ namespace BossChecklist
 {
 	public class WorldAssist : ModSystem
 	{
-		// Since only 1 set of records is saved per boss, there is no need to put it into a dictionary.
-		public static List<WorldRecord> worldRecords;
+		// Since only 1 set of records is saved per boss, there is no need to put it into a dictionary
+		// A separate list of World Records is needed to hold information about unloaded entries
+		public static WorldRecord[] worldRecords;
+		public static List<WorldRecord> unloadedWorldRecords;
 
 		// Bosses will be set to true when they spawn and will only be set back to false when the boss despawns or dies
 		public static bool[] Tracker_ActiveEntry;
 
 		// Players that are in the server when a boss fight starts
 		// Prevents players that join a server mid bossfight from messing up records
-		public static List<bool[]> Tracker_StartingPlayers;
+		public static bool[,] Tracker_StartingPlayers;
 
 		public static bool[] CheckedRecordIndexes;
 
-		public static HashSet<string> HiddenBosses = new HashSet<string>();
+		public static HashSet<string> HiddenEntries = new HashSet<string>();
+		public static HashSet<string> MarkedEntries = new HashSet<string>();
 
 		public static bool downedBloodMoon;
 		public static bool downedFrostMoon;
@@ -41,10 +44,10 @@ namespace BossChecklist
 		public static bool downedInvasionT3Ours;
 		public static bool downedTorchGod;
 
-		bool isBloodMoon = false;
-		bool isPumpkinMoon = false;
-		bool isFrostMoon = false;
-		bool isEclipse = false;
+		bool Tracker_BloodMoon = false;
+		bool Tracker_PumpkinMoon = false;
+		bool Tracker_FrostMoon = false;
+		bool Tracker_SolarEclipse = false;
 
 		public override void Load() {
 			On.Terraria.GameContent.Events.DD2Event.WinInvasionInternal += DD2Event_WinInvasionInternal;
@@ -58,161 +61,61 @@ namespace BossChecklist
 				downedInvasionT3Ours = true;
 		}
 
-		public override void OnWorldLoad() {
-			HiddenBosses.Clear();
-
+		private void ClearDownedBools() {
+			// Events
 			downedBloodMoon = false;
 			downedFrostMoon = false;
 			downedPumpkinMoon = false;
 			downedSolarEclipse = false;
 
-			isBloodMoon = false;
-			isFrostMoon = false;
-			isPumpkinMoon = false;
-			isEclipse = false;
+			// Event trackers
+			Tracker_BloodMoon = false;
+			Tracker_FrostMoon = false;
+			Tracker_PumpkinMoon = false;
+			Tracker_SolarEclipse = false;
 
+			// MiniBosses
 			downedDarkMage = false;
 			downedOgre = false;
 			downedFlyingDutchman = false;
 			downedMartianSaucer = false;
 
+			// Vanilla additions
 			downedInvasionT2Ours = false;
 			downedInvasionT3Ours = false;
 			downedTorchGod = false;
+		}
+
+		public override void OnWorldLoad() {
+			HiddenEntries.Clear();
+			MarkedEntries.Clear();
+
+			ClearDownedBools();
 
 			// Record related lists that should be the same count of record tracking entries
-			worldRecords = new List<WorldRecord>();
+			worldRecords = new WorldRecord[BossChecklist.bossTracker.BossRecordKeys.Count];
+			unloadedWorldRecords = new List<WorldRecord>();
 			CheckedRecordIndexes = new bool[BossChecklist.bossTracker.BossRecordKeys.Count];
 			Tracker_ActiveEntry = new bool[BossChecklist.bossTracker.BossRecordKeys.Count];
-			Tracker_StartingPlayers = new List<bool[]>();
+			Tracker_StartingPlayers = new bool[BossChecklist.bossTracker.BossRecordKeys.Count, Main.maxPlayers];
+
+			// Populate world records list
 			foreach (string key in BossChecklist.bossTracker.BossRecordKeys) {
-				worldRecords.Add(new WorldRecord(key));
-				Tracker_StartingPlayers.Add(new bool[Main.maxPlayers]);
+				worldRecords[BossChecklist.bossTracker.SortedEntries[BossChecklist.bossTracker.SortedEntries.FindIndex(x => x.Key == key)].GetRecordIndex] = new WorldRecord(key);
 			}
 		}
 
-		public override void PreUpdateWorld() {
-			if (BossChecklist.DebugConfig.DISABLERECORDTRACKINGCODE)
-				return;
-
-			foreach (NPC npc in Main.npc) {
-				int bossIndex = NPCAssist.GetBossInfoIndex(npc.type, true);
-				if (bossIndex == -1)
-					continue;
-				int recordIndex = BossChecklist.bossTracker.SortedBosses[bossIndex].GetRecordIndex;
-				if (recordIndex == -1 || CheckedRecordIndexes[recordIndex])
-					continue;
-
-				// Prevents checking and updating NPCs within the same entry npc pool for performance
-				CheckedRecordIndexes[recordIndex] = true;
-
-				// If marked as active...
-				if (Tracker_ActiveEntry[recordIndex]) {
-					// ...remove any players that become inactive during the fight
-					for (int i = 0; i < Main.maxPlayers; i++) {
-						if (!Main.player[i].active) {
-							Tracker_StartingPlayers[recordIndex][i] = false;
-						}
-					}
-
-					// ...check if the npc is actually still active or not and display a despawn message if they are no longer active (but not killed!)
-					if (NPCAssist.FullyInactive(npc, bossIndex, true)) {
-						Tracker_ActiveEntry[recordIndex] = false; // No longer an active boss (only other time this is set to false is NPC.OnKill)
-						string message = NPCAssist.GetDespawnMessage(npc, bossIndex);
-						if (message != "") {
-							if (Main.netMode == NetmodeID.SinglePlayer) {
-								Main.NewText(Language.GetTextValue(message, npc.FullName), Colors.RarityPurple);
-							}
-							else {
-								ChatHelper.BroadcastChatMessage(NetworkText.FromKey(message, npc.FullName), Colors.RarityPurple);
-							}
-						}
-					}
-				}
-			}
-			// Resets all to false
-			for (int i = 0; i < CheckedRecordIndexes.Length; i++) {
-				CheckedRecordIndexes[i] = false;
-			}
+		public override void OnWorldUnload() {
+			ClearDownedBools(); // Reset downs and trackers to prevent "defeation" of an entry
 		}
 
-		public override void PostUpdateWorld() {
-			string EventKey = "";
-
-			// Blood Moon
-			if (Main.bloodMoon) {
-				isBloodMoon = true;
-			}
-			else if (isBloodMoon) {
-				isBloodMoon = false;
-				EventKey = "Mods.BossChecklist.EventEnd.BloodMoon";
-				if (!downedBloodMoon) {
-					downedBloodMoon = true;
-					if (Main.netMode == NetmodeID.Server) {
-						NetMessage.SendData(MessageID.WorldData);
-					}
-				}
-			}
-
-			// Frost Moon
-			if (Main.snowMoon) {
-				isFrostMoon = true;
-			}
-			else if (isFrostMoon) {
-				isFrostMoon = false;
-				EventKey = "Mods.BossChecklist.EventEnd.FrostMoon";
-				if (!downedFrostMoon) {
-					downedFrostMoon = true;
-					if (Main.netMode == NetmodeID.Server) {
-						NetMessage.SendData(MessageID.WorldData);
-					}
-				}
-			}
-
-			// Pumpkin Moon
-			if (Main.pumpkinMoon) {
-				isPumpkinMoon = true;
-			}
-			else if (isPumpkinMoon) {
-				isPumpkinMoon = false;
-				EventKey = "Mods.BossChecklist.EventEnd.PumpkinMoon";
-				if (!downedPumpkinMoon) {
-					downedPumpkinMoon = true;
-					if (Main.netMode == NetmodeID.Server) {
-						NetMessage.SendData(MessageID.WorldData);
-					}
-				}
-			}
-
-			// Solar Eclipse
-			if (Main.eclipse) {
-				isEclipse = true;
-			}
-			else if (isEclipse) {
-				isEclipse = false;
-				EventKey = "Mods.BossChecklist.EventEnd.SolarEclipse";
-				if (!downedSolarEclipse) {
-					downedSolarEclipse = true;
-					if (Main.netMode == NetmodeID.Server) {
-						NetMessage.SendData(MessageID.WorldData);
-					}
-				}
-			}
-
-			// Event Ending Messages
-			if (EventKey != "") {
-				NetworkText message = NetworkText.FromKey(EventKey);
-				if (Main.netMode == NetmodeID.SinglePlayer) {
-					Main.NewText(message.ToString(), Colors.RarityGreen);
-				}
-				else {
-					ChatHelper.BroadcastChatMessage(message, Colors.RarityGreen);
-				}
-			}
+		public override void PreWorldGen() {
+			ClearDownedBools(); // Reset downs and trackers back to false if creating a new world
 		}
 
 		public override void SaveWorldData(TagCompound tag) {
-			var HiddenBossesList = new List<string>(HiddenBosses);
+			var HiddenBossesList = new List<string>(HiddenEntries);
+			var MarkedAsDownedList = new List<string>(MarkedEntries);
 
 			var downed = new List<string>();
 			if (downedBloodMoon)
@@ -240,34 +143,38 @@ namespace BossChecklist
 
 			tag["downed"] = downed;
 			tag["HiddenBossesList"] = HiddenBossesList;
-			// TODO: unloaded entry data must be preserved
-			if (worldRecords == null) {
-				tag["Records"] = new List<WorldRecord>();
-			}
-			else {
-				tag["Records"] = new List<WorldRecord>(worldRecords);
+			tag["downed_Forced"] = MarkedAsDownedList;
+
+			if (worldRecords != null) {
+				tag["WorldRecords"] = worldRecords.Concat(unloadedWorldRecords).ToList(); // Combine loaded and unloaded data to prevent lost world record data
 			}
 		}
 
 		public override void LoadWorldData(TagCompound tag) {
-			List<WorldRecord> SavedWorldRecords = tag.Get<List<WorldRecord>>("Records").ToList();
+			unloadedWorldRecords.Clear();
+			List<WorldRecord> SavedWorldRecords = tag.Get<List<WorldRecord>>("WorldRecords").ToList();
 			foreach (WorldRecord record in SavedWorldRecords) {
-				// Check to see if the boss is assigned within the SotredBoss list
-				// If we know an entry was added that isn't a boss (old player data) skip adding this entry, effectively removing it when next saved.
-				int sortedIndex = BossChecklist.bossTracker.SortedBosses.FindIndex(x => x.Key == record.bossKey);
-				if (sortedIndex != -1 && BossChecklist.bossTracker.SortedBosses[sortedIndex].type != EntryType.Boss)
-					continue;
+				int sortedIndex = BossChecklist.bossTracker.SortedEntries.FindIndex(x => x.Key == record.bossKey);
+				if (sortedIndex == -1) {
+					unloadedWorldRecords.Add(record); // Add any unloaded entries to this list
+					continue; // Entry is not loaded
+				}
+				else if (BossChecklist.bossTracker.SortedEntries[sortedIndex].type != EntryType.Boss)
+					continue; // Loaded entry is not a boss
 
-				int index = worldRecords.FindIndex(x => x.bossKey == record.bossKey);
-				if (index == -1)
-					worldRecords.Add(record);
-				else
-					worldRecords[index] = record;
+				// Set record data to list based on record index
+				// Data here can't be null as the key is checked beforehand
+				worldRecords[BossChecklist.bossTracker.SortedEntries[sortedIndex].GetRecordIndex] = record;
 			}
 
 			var HiddenBossesList = tag.GetList<string>("HiddenBossesList");
 			foreach (var bossKey in HiddenBossesList) {
-				HiddenBosses.Add(bossKey);
+				HiddenEntries.Add(bossKey);
+			}
+
+			var MarkedAsDownedList = tag.GetList<string>("downed_Forced");
+			foreach (var bossKey in MarkedAsDownedList) {
+				MarkedEntries.Add(bossKey);
 			}
 
 			var downed = tag.GetList<string>("downed");
@@ -311,8 +218,13 @@ namespace BossChecklist
 			};
 			writer.Write(flags);
 
-			writer.Write(HiddenBosses.Count);
-			foreach (var bossKey in HiddenBosses) {
+			writer.Write(HiddenEntries.Count);
+			foreach (var bossKey in HiddenEntries) {
+				writer.Write(bossKey);
+			}
+
+			writer.Write(MarkedEntries.Count);
+			foreach (var bossKey in MarkedEntries) {
 				writer.Write(bossKey);
 			}
 		}
@@ -337,14 +249,140 @@ namespace BossChecklist
 			downedInvasionT3Ours = flags[5];
 			downedTorchGod = flags[6];
 
-			HiddenBosses.Clear();
+			HiddenEntries.Clear();
 			int count = reader.ReadInt32();
 			for (int i = 0; i < count; i++) {
-				HiddenBosses.Add(reader.ReadString());
+				HiddenEntries.Add(reader.ReadString());
 			}
+
+			MarkedEntries.Clear();
+			count = reader.ReadInt32();
+			for (int i = 0; i < count; i++) {
+				MarkedEntries.Add(reader.ReadString());
+			}
+
+			// Update checklist to match Hidden and Marked Downed entries
 			BossUISystem.Instance.bossChecklistUI.UpdateCheckboxes();
-			if (BossChecklist.BossLogConfig.HideUnavailable && BossLogUI.PageNum == -1) {
-				BossUISystem.Instance.BossLog.UpdateTableofContents();
+			if (BossUISystem.Instance.BossLog.BossLogVisible && BossUISystem.Instance.BossLog.PageNum == -1) {
+				BossUISystem.Instance.BossLog.RefreshPageContent();
+			}
+		}
+
+		public override void PreUpdateWorld() {
+			HandleMoonDowns();
+			if (BossChecklist.DebugConfig.DISABLERECORDTRACKINGCODE)
+				return;
+
+			foreach (NPC npc in Main.npc) {
+				EntryInfo entry = NPCAssist.GetEntryInfo(npc.type);
+				if (entry == null)
+					continue;
+
+				int recordIndex = entry.GetRecordIndex;
+				if (recordIndex == -1 || CheckedRecordIndexes[recordIndex])
+					continue; // If the NPC's record index is invalid OR was already handled, move on to the next NPC
+
+				CheckedRecordIndexes[recordIndex] = true; // record index will be handled, so no need to check it again
+
+				// If marked as active...
+				if (Tracker_ActiveEntry[recordIndex]) {
+					// ...remove any players that become inactive during the fight
+					foreach (Player player in Main.player) {
+						if (!player.active)
+							Tracker_StartingPlayers[recordIndex, player.whoAmI] = false;
+					}
+
+					// ...check if the npc is actually still active or not and display a despawn message if they are no longer active (but not killed!)
+					if (NPCAssist.FullyInactive(npc, entry.GetIndex)) {
+						Tracker_ActiveEntry[recordIndex] = false; // No longer an active boss (only other time this is set to false is NPC.OnKill)
+						string message = NPCAssist.GetDespawnMessage(npc, entry.GetIndex);
+						if (!string.IsNullOrEmpty(message)) {
+							if (Main.netMode == NetmodeID.SinglePlayer) {
+								Main.NewText(Language.GetTextValue(message, npc.FullName), Colors.RarityPurple);
+							}
+							else {
+								ChatHelper.BroadcastChatMessage(NetworkText.FromKey(message, npc.FullName), Colors.RarityPurple);
+							}
+						}
+					}
+				}
+			}
+
+			for (int i = 0; i < CheckedRecordIndexes.Length; i++) {
+				CheckedRecordIndexes[i] = false; // reset all handled record indexes to false after iterating through all NPCs
+			}
+		}
+
+		public void AnnounceEventEnd(string eventType) {
+			// TODO: Custom/Generic announcements
+			NetworkText message = NetworkText.FromKey($"{NPCAssist.LangChat}.EventEnd.{eventType}");
+			if (Main.netMode == NetmodeID.SinglePlayer) {
+				Main.NewText(message.ToString(), Colors.RarityGreen);
+			}
+			else {
+				ChatHelper.BroadcastChatMessage(message, Colors.RarityGreen);
+			}
+		}
+
+		public void HandleMoonDowns() {
+			// Blood Moon
+			if (Main.bloodMoon) {
+				Tracker_BloodMoon = true;
+			}
+			else if (Tracker_BloodMoon) {
+				Tracker_BloodMoon = false;
+				AnnounceEventEnd("BloodMoon"); // Sends a message to all players that the moon event has ended
+				if (!downedBloodMoon) {
+					downedBloodMoon = true;
+					if (Main.netMode == NetmodeID.Server) {
+						NetMessage.SendData(MessageID.WorldData);
+					}
+				}
+			}
+
+			// Frost Moon
+			if (Main.snowMoon) {
+				Tracker_FrostMoon = true;
+			}
+			else if (Tracker_FrostMoon) {
+				Tracker_FrostMoon = false;
+				AnnounceEventEnd("FrostMoon");
+				if (!downedFrostMoon) {
+					downedFrostMoon = true;
+					if (Main.netMode == NetmodeID.Server) {
+						NetMessage.SendData(MessageID.WorldData);
+					}
+				}
+			}
+
+			// Pumpkin Moon
+			if (Main.pumpkinMoon) {
+				Tracker_PumpkinMoon = true;
+			}
+			else if (Tracker_PumpkinMoon) {
+				Tracker_PumpkinMoon = false;
+				AnnounceEventEnd("PumpkinMoon");
+				if (!downedPumpkinMoon) {
+					downedPumpkinMoon = true;
+					if (Main.netMode == NetmodeID.Server) {
+						NetMessage.SendData(MessageID.WorldData);
+					}
+				}
+			}
+
+			// Solar Eclipse
+			if (Main.eclipse) {
+				Tracker_SolarEclipse = true;
+			}
+			else if (Tracker_SolarEclipse) {
+				Tracker_SolarEclipse = false;
+				AnnounceEventEnd("SolarEclipse");
+				if (!downedSolarEclipse) {
+					downedSolarEclipse = true;
+					if (Main.netMode == NetmodeID.Server) {
+						NetMessage.SendData(MessageID.WorldData);
+					}
+				}
 			}
 		}
 	}

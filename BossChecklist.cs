@@ -7,6 +7,7 @@ using System.Linq;
 using System.Reflection;
 using Terraria;
 using Terraria.ID;
+using Terraria.Localization;
 using Terraria.ModLoader;
 using Terraria.ModLoader.Config;
 
@@ -18,6 +19,7 @@ namespace BossChecklist
 		internal static BossTracker bossTracker;
 		internal static ModKeybind ToggleChecklistHotKey;
 		public static ModKeybind ToggleBossLog;
+		private string LastVanillaProgressionRevision = "v1.4.0"; // This should be updated whenever a vanilla progression value is changed, or if another vanilla boss is added.
 
 		public static Dictionary<int, int> itemToMusicReference;
 
@@ -67,7 +69,8 @@ namespace BossChecklist
 			}
 			*/
 
-			if(!DebugConfig.ModCallLogVerbose)
+			Logger.Info($"Progression values for vanilla entries have been last updated on BossChecklist {LastVanillaProgressionRevision}");
+			if (!DebugConfig.ModCallLogVerbose)
 				Logger.Info("Boss Log integration messages will not be logged.");
 		}
 
@@ -113,14 +116,6 @@ namespace BossChecklist
 			}
 		}
 
-		public override void AddRecipes() {
-			//bossTracker.FinalizeLocalization();
-			bossTracker.FinalizeOrphanData(); // Add any remaining boss data, including added NPCs, loot, collectibles and spawn items.
-			bossTracker.FinalizeBossLootTables(); // Generate boss loot data. Treasurebag is also determined in this.
-			bossTracker.FinalizeCollectionTypes(); // Collectible types have to be determined AFTER all items in orphan data has been added.
-			bossTracker.FinalizeBossData(); // Finalize all boss data. Entries cannot be further edited beyond this point.
-		}
-
 		// Messages:
 		// string:"AddBoss" - string:Bossname - float:bossvalue - Func<bool>:BossDowned
 		// 0.2: added 6th parameter to AddBossWithInfo/AddMiniBossWithInfo/AddEventWithInfo: Func<bool> available
@@ -141,18 +136,18 @@ namespace BossChecklist
 
 					Logger.Info($"{(mod.DisplayName ?? "A mod")} has registered for GetBossInfoDictionary");
 
-					if (!bossTracker.BossesFinalized) {
+					if (!bossTracker.EntriesFinalized) {
 						Logger.Warn($"Call Warning: The attempted message, \"{message}\", was sent too early. Expect the Call message to return incomplete data. For best results, call in PostAddRecipes.");
 					}
 					//if (message == "GetBossInfoExpando") {
 					//	return bossTracker.SortedBosses.ToDictionary(boss => boss.Key, boss => boss.ConvertToExpandoObject());
 					//}
 					if (message == "GetBossInfoDictionary") {
-						return bossTracker.SortedBosses.ToDictionary(boss => boss.Key, boss => boss.ConvertToDictionary(apiVersion));
+						return bossTracker.SortedEntries.ToDictionary(boss => boss.Key, boss => boss.ConvertToDictionary(apiVersion));
 					}
 					return "Failure";
 				}
-				if (bossTracker.BossesFinalized)
+				if (bossTracker.EntriesFinalized)
 					throw new Exception($"Call Error: The attempted message, \"{message}\", was sent too late. BossChecklist expects Call messages up until before AddRecipes.");
 				if (message == "AddBoss" || message == "AddBossWithInfo") { // For compatability reasons
 					if (argsLength < 7) {
@@ -193,7 +188,8 @@ namespace BossChecklist
 							InterpretObjectAsListOfInt(args[8]), // Spawn Items
 							args[9] as string, // Spawn Info
 							InterpretObjectAsStringFunction(args[10]), // Despawn message
-							args[11] as Action<SpriteBatch, Rectangle, Color> // Custom Drawing
+							args[11] as Action<SpriteBatch, Rectangle, Color>, // Custom Drawing
+							InterpretObjectAsListOfStrings(args[12])
 						);
 					}
 					return "Success";
@@ -237,7 +233,8 @@ namespace BossChecklist
 							InterpretObjectAsListOfInt(args[8]), // Spawn Items
 							args[9] as string, // Spawn Info
 							InterpretObjectAsStringFunction(args[10]), // Despawn message
-							args[11] as Action<SpriteBatch, Rectangle, Color> // Custom Drawing
+							args[11] as Action<SpriteBatch, Rectangle, Color>, // Custom Drawing
+							InterpretObjectAsListOfStrings(args[12])
 						);
 					}
 					return "Success";
@@ -280,7 +277,8 @@ namespace BossChecklist
 							InterpretObjectAsListOfInt(args[7]), // Collection
 							InterpretObjectAsListOfInt(args[8]), // Spawn Items
 							args[9] as string, // Spawn Info
-							args[10] as Action<SpriteBatch, Rectangle, Color> // Custom Drawing
+							args[10] as Action<SpriteBatch, Rectangle, Color>, // Custom Drawing
+							InterpretObjectAsListOfStrings(args[11])
 						);
 					}
 					return "Success";
@@ -297,6 +295,10 @@ namespace BossChecklist
 						args[1] as string, // Boss Key (obtainable via the BossLog, when display config is enabled)
 						InterpretObjectAsListOfInt(args[2]) // ID List
 					);
+					if (argsLength != 3) {
+						if (DebugConfig.ModCallLogVerbose)
+							Logger.Warn($"{message} mod call from the above mod is structured improperly. Mod developers can refer to link below:\n https://github.com/JavidPack/BossChecklist/wiki/[1.4]-Other-Mod-Calls");
+					}
 					return "Success";
 				}
 				else {
@@ -311,7 +313,7 @@ namespace BossChecklist
 			// Local functions.
 			List<int> InterpretObjectAsListOfInt(object data) => data is List<int> ? data as List<int> : (data is int ? new List<int>() { Convert.ToInt32(data) } : null);
 			Func<NPC, string> InterpretObjectAsStringFunction(object data) => data is Func<NPC, string> ? data as Func<NPC, string> : (data is string ? npc => data as string : null);
-			//List<string> InterpretObjectAsListOfStrings(object data) => data is List<string> ? data as List<string> : (data is string ? new List<string>() { data as string } : null);
+			List<string> InterpretObjectAsListOfStrings(object data) => data is List<string> ? data as List<string> : (data is string ? new List<string>() { data as string } : null);
 
 			void AddToOldCalls(string message, string name) {
 				// TODO: maybe spam the log if ModCompile.activelyModding (needs reflection)
@@ -334,9 +336,9 @@ namespace BossChecklist
 					string bossKey = reader.ReadString();
 					bool hide = reader.ReadBoolean();
 					if (hide)
-						WorldAssist.HiddenBosses.Add(bossKey);
+						WorldAssist.HiddenEntries.Add(bossKey);
 					else
-						WorldAssist.HiddenBosses.Remove(bossKey);
+						WorldAssist.HiddenEntries.Remove(bossKey);
 					if (Main.netMode == NetmodeID.Server)
 						NetMessage.SendData(MessageID.WorldData);
 					//else
@@ -347,22 +349,35 @@ namespace BossChecklist
 					//{
 					//	Main.NewText("Huh? RequestClearHidden on client?");
 					//}
-					WorldAssist.HiddenBosses.Clear();
+					WorldAssist.HiddenEntries.Clear();
 					if (Main.netMode == NetmodeID.Server)
 						NetMessage.SendData(MessageID.WorldData);
 					//else
 					//	ErrorLogger.Log("BossChecklist: Why is RequestHideBoss on Client/SP?");
 					break;
-				case PacketMessageType.SendRecordsToServer:
-					// When sending records to the server, it should always be sent from a player client, meaning whoAmI can be used to determine the player
-					// If total count is equal to 1, a record update must be taking place
-					// If total count is greater than 1, the packet must have been sent from a newly connected player
-					int totalCount = reader.ReadInt32();
-					if (totalCount > 1) {
-						Console.ForegroundColor = ConsoleColor.DarkYellow;
-						Console.WriteLine($"Attempting to receive personal records from the connected player '{Main.player[whoAmI].name}'...");
+				case PacketMessageType.RequestMarkedDownEntry:
+					bossKey = reader.ReadString();
+					bool mark = reader.ReadBoolean();
+					if (mark) {
+						WorldAssist.MarkedEntries.Add(bossKey);
+					}
+					else {
+						WorldAssist.MarkedEntries.Remove(bossKey);
 					}
 
+					if (Main.netMode == NetmodeID.Server) {
+						NetMessage.SendData(MessageID.WorldData);
+					}
+					break;
+				case PacketMessageType.RequestClearMarkedDowns:
+					WorldAssist.MarkedEntries.Clear();
+					if (Main.netMode == NetmodeID.Server) {
+						NetMessage.SendData(MessageID.WorldData);
+					}
+					break;
+				case PacketMessageType.SendRecordsToServer:
+					// When sending records to the server, it should always be sent from a player client, meaning whoAmI can be used to determine the player
+					int totalCount = reader.ReadInt32();
 					int invalidConflicts = 0;
 					for (int i = 0; i < totalCount; i++) {
 						// Read the bossKey and attempt to locate its position within the server's collection of records
@@ -382,52 +397,45 @@ namespace BossChecklist
 						bossStats.hitsTakenBest = reader.ReadInt32();
 					}
 
-					if (totalCount > 1) {
-						if (invalidConflicts > 0) {
-							Console.ForegroundColor = ConsoleColor.DarkRed;
-							Console.WriteLine($"Personal records for player '{Main.player[whoAmI].name}' has been retrieved with {invalidConflicts} conflicts");
-						}
-						else {
-							Console.ForegroundColor = ConsoleColor.Green;
-							Console.WriteLine($"Personal records for player '{Main.player[whoAmI].name}' has successfully been retrieved!");
-						}
-						Console.ResetColor();
+					if (invalidConflicts > 0) {
+						Console.ForegroundColor = ConsoleColor.DarkRed;
+						Console.WriteLine($"Personal records for player '{Main.player[whoAmI].name}' has been retrieved with {invalidConflicts} conflicts");
 					}
+					else {
+						Console.ForegroundColor = ConsoleColor.Green;
+						Console.WriteLine($"Personal records for player '{Main.player[whoAmI].name}' has successfully been retrieved!");
+					}
+					Console.ResetColor();
 					break;
 				case PacketMessageType.RecordUpdate:
-					// Server just sent us information about what boss just got killed and its records should be updated
-					// Grab the player's records and update them through the reader (player and npcPos needed for new record)
+					// The server just sent updated information for a player's records and it will be used to update the records for the client as well
 					// Since the packet is being sent with 'toClient: i', LocalPlayer can be used here
-					int npcPos = reader.ReadInt32();
-					modPlayer = Main.LocalPlayer.GetModPlayer<PlayerAssist>();
-					BossRecord record = modPlayer.RecordsForWorld[npcPos];
-					record.stats.NetRecieve(reader, Main.LocalPlayer, npcPos);
-
-					Console.ForegroundColor = ConsoleColor.DarkCyan;
-					Console.WriteLine($"Updated a boss record for player '{Main.LocalPlayer.name}'");
-					Console.ResetColor();
-
-					// Whenever records are updated, the server will need to have this updated information as well
-					ModPacket packet = GetPacket();
-					packet.Write((byte)PacketMessageType.SendRecordsToServer);
-					packet.Write(1); // Since RecordUpdate only updates one record at a time, the count is set to 1
-					packet.Write(record.bossKey);
-					packet.Write(record.stats.durationPrev);
-					packet.Write(record.stats.durationBest);
-					packet.Write(record.stats.hitsTakenPrev);
-					packet.Write(record.stats.hitsTakenBest);
-					packet.Send(); // Multiplayer client --> Server
+					int recordIndex = reader.ReadInt32();
+					Main.LocalPlayer.GetModPlayer<PlayerAssist>().RecordsForWorld[recordIndex].stats.NetRecieve(reader);
 					break;
 				case PacketMessageType.WorldRecordUpdate:
-					// World Record updates are sent from the server to the server so its data can be sent to all players
-					// Grab the world records of the selected boss and update them through the reader
-					npcPos = reader.ReadInt32();
-					WorldStats worldRecords = WorldAssist.worldRecords[npcPos].stats;
-					worldRecords.NetRecieve(reader);
-
-					Console.ForegroundColor = ConsoleColor.Cyan;
-					Console.WriteLine($"World records have been updated!");
-					Console.ResetColor();
+					// World Records should be shared to all clients
+					recordIndex = reader.ReadInt32();
+					WorldAssist.worldRecords[recordIndex].stats.NetRecieve(reader);
+					break;
+				case PacketMessageType.PlayTimeRecordUpdate:
+					recordIndex = reader.ReadInt32();
+					long playTime = reader.ReadInt64();
+					ServerCollectedRecords[whoAmI][recordIndex].stats.playTimeFirst = playTime;
+					break;
+				case PacketMessageType.ResetTrackers:
+					recordIndex = reader.ReadInt32();
+					int plrIndex = reader.ReadInt32();
+					modPlayer = Main.player[plrIndex].GetModPlayer<PlayerAssist>();
+					if (recordIndex != -1) {
+						modPlayer.Tracker_Duration[recordIndex] = 0;
+						modPlayer.Tracker_HitsTaken[recordIndex] = 0;
+					}
+					else {
+						modPlayer.Tracker_Duration = new int[bossTracker.BossRecordKeys.Count];
+						modPlayer.Tracker_Deaths = new bool[bossTracker.BossRecordKeys.Count];
+						modPlayer.Tracker_HitsTaken = new int[bossTracker.BossRecordKeys.Count];
+					}
 					break;
 				default:
 					Logger.Error($"Unknown Message type: {msgType}");

@@ -13,314 +13,280 @@ namespace BossChecklist
 {
 	class NPCAssist : GlobalNPC
 	{
+		public const string LangChat = "Mods.BossChecklist.ChatMessages";
+
 		// When an entry NPC spawns, setup the world and player trackers for the upcoming fight
 		public override void OnSpawn(NPC npc, IEntitySource source) {
-			if (BossChecklist.DebugConfig.DISABLERECORDTRACKINGCODE)
+			// Only single player and server should be starting the record tracking process
+			if (Main.netMode == NetmodeID.MultiplayerClient || BossChecklist.DebugConfig.DISABLERECORDTRACKINGCODE)
 				return;
 
-			if (npc.realLife != -1 && npc.realLife != npc.whoAmI)
-				return; // Checks for multi-segmented bosses?
-
-			int index = GetBossInfoIndex(npc.type, true);
-			if (index == -1)
+			EntryInfo entry = GetEntryInfo(npc.type);
+			if (entry == null)
 				return; // Make sure the npc is an entry
 
 			// If not marked active, set to active and reset trackers for all players to start tracking records for this fight
-			int recordIndex = BossChecklist.bossTracker.SortedBosses[index].GetRecordIndex;
+			int recordIndex = entry.GetRecordIndex;
 			if (!WorldAssist.Tracker_ActiveEntry[recordIndex]) {
 				WorldAssist.Tracker_ActiveEntry[recordIndex] = true;
-				for (int j = 0; j < Main.maxPlayers; j++) {
-					if (!Main.player[j].active)
-						continue; // skip any inactive players
 
-					WorldAssist.Tracker_StartingPlayers[recordIndex][j] = true; // Active players when the boss spawns will be counted
-					// Reset Timers and counters so we can start recording the next fight
-					PlayerAssist modPlayer = Main.player[j].GetModPlayer<PlayerAssist>();
+				if (Main.netMode == NetmodeID.SinglePlayer) {
+					WorldAssist.Tracker_StartingPlayers[recordIndex, Main.LocalPlayer.whoAmI] = true; // Active players when the boss spawns will be counted
+					PlayerAssist modPlayer = Main.LocalPlayer.GetModPlayer<PlayerAssist>();
 					modPlayer.Tracker_Duration[recordIndex] = 0;
 					modPlayer.Tracker_HitsTaken[recordIndex] = 0;
+				}
+				else if (Main.netMode == NetmodeID.Server) {
+					foreach (Player player in Main.player) {
+						if (!player.active)
+							continue; // skip any inactive players
+
+						WorldAssist.Tracker_StartingPlayers[recordIndex, player.whoAmI] = true; // Active players when the boss spawns will be counted
+
+						// This is updated serverside
+						PlayerAssist modPlayer = player.GetModPlayer<PlayerAssist>();
+						modPlayer.Tracker_Duration[recordIndex] = 0;
+						modPlayer.Tracker_HitsTaken[recordIndex] = 0;
+
+						// Needs to be updated client side as well
+						// Send packets from the server to all participating players to reset their trackers for the recordIndex provided
+						ModPacket packet = Mod.GetPacket();
+						packet.Write((byte)PacketMessageType.ResetTrackers);
+						packet.Write(recordIndex);
+						packet.Write(player.whoAmI);
+						packet.Send(toClient: player.whoAmI); // Server --> Multiplayer client
+					}
 				}
 			}
 		}
 
-		// When an NPC is killed and fully inactive, the fight has ended, stopping record trackers
+		// When an NPC is killed and fully inactive the fight has ended, so stop all record trackers
 		public override void OnKill(NPC npc) {
-			HandleDownedNPCs(npc); // Custom downed bool code
+			HandleDownedNPCs(npc.type); // Custom downed bool code
 			SendEntryMessage(npc); // Display a message for Limbs/Towers if config is enabled
+
+			if (BossChecklist.DebugConfig.DISABLERECORDTRACKINGCODE)
+				return;
 
 			// Stop record trackers and record them to the player while also checking for records and world records
 			
-			int index = GetBossInfoIndex(npc.type, true);
-			if (index != -1) {
-				if (FullyInactive(npc, index)) {
-					if (!BossChecklist.DebugConfig.NewRecordsDisabled && !BossChecklist.DebugConfig.RecordTrackingDisabled) {
-						CheckRecords(npc, index);
+			EntryInfo entry = GetEntryInfo(npc.type);
+			if (entry != null) {
+				int index = entry.GetIndex;
+				int recordIndex = entry.GetRecordIndex;
+				if (FullyInactive(npc, index, true)) {
+					if (!BossChecklist.DebugConfig.RecordTrackingDisabled) {
+						if (Main.netMode == NetmodeID.Server) {
+							Networking.UpdateServerRecords(npc, recordIndex);
+						}
+						else if (Main.netMode == NetmodeID.SinglePlayer) {
+							CheckRecords(npc, recordIndex);
+						}
+						else if (Main.netMode == NetmodeID.MultiplayerClient) {
+							Networking.SubmitPlayTimeToServer(npc, recordIndex);
+						}
 					}
 
-					if (BossChecklist.DebugConfig.ShowInactiveBossCheck)
+					if (BossChecklist.DebugConfig.ShowInactiveBossCheck && Main.netMode != NetmodeID.Server)
 						Main.NewText(npc.FullName + ": " + FullyInactive(npc, index));
 
-					int recordIndex = BossChecklist.bossTracker.SortedBosses[index].GetRecordIndex;
 					WorldAssist.worldRecords[recordIndex].stats.totalKills++;
 
 					// Reset world variables after record checking takes place
 					WorldAssist.Tracker_ActiveEntry[recordIndex] = false;
-					WorldAssist.Tracker_StartingPlayers[recordIndex] = new bool[Main.maxPlayers];
+					for (int i = 0; i < Main.maxPlayers; i++) {
+						WorldAssist.Tracker_StartingPlayers[recordIndex, i] = false;
+					}
 				}
 			}
 		}
 
 		/// <summary>
-		/// Loops through all entries in BossTracker.SortedBosses to find BossInfo that contains the specified npc type.
+		/// Loops through all entries in BossTracker.SortedEntries to find EntryInfo that contains the specified npc type.
+		/// This method is mainly used for boss record purposes.
 		/// </summary>
-		/// <param name="bossesOnly">Leave false to use this for any entry. Set to true while using this for boss record purposes.</param>
-		/// <returns>The index within BossTracker.SortedBosses. Returns -1 if searching for an invalid npc type.</returns>
-		public static int GetBossInfoIndex(int npcType, bool bossesOnly = false) {
-			if (!BossChecklist.bossTracker.BossCache[npcType])
-				return -1;
+		/// <returns>A valid EntryInfo entry within the registered entries. Returns null if no entry can be found.</returns>
+		public static EntryInfo GetEntryInfo(int npcType) {
+			if (!BossChecklist.bossTracker.EntryCache[npcType])
+				return null; // the entry hasn't been registered
 
-			List<BossInfo> BossInfoList = BossChecklist.bossTracker.SortedBosses;
-			for (int index = 0; index < BossInfoList.Count; index++) {
-				if (bossesOnly && BossInfoList[index].type != EntryType.Boss) {
-					continue;
-				}
-				if (BossInfoList[index].npcIDs.Contains(npcType)) {
-					return index;
-				}
+			foreach (EntryInfo entry in BossChecklist.bossTracker.SortedEntries) {
+				if (entry.type == EntryType.Boss && entry.npcIDs.Contains(npcType))
+					return entry; // if the npc pool contains the npc type, return the current the index
 			}
-			return -1;
+
+			return null; // no entry found
 		}
 
 		/// <summary>
 		/// Searches for all npc types of a given SortedBosses index and checks their active status within Main.npc. Does not include the passed NPC itself unless specified.
 		/// </summary>
+		/// <param name="excludePassedNPC">Whether or not this method should also check if the NPC passed is inactive.</param>
 		/// <returns>Whether or not an npc listed in the specified entry's npc pool is active or not.</returns>
-		public static bool FullyInactive(NPC npc, int index, bool includePassedNPC = false) {
-			// Check all multibosses to see if the NPC is truly dead
-			// index should be checked for a value of -1 before submitting, but just in case...
+		public static bool FullyInactive(NPC npc, int index, bool excludePassedNPC = false) {
 			if (index == -1)
-				return !npc.active;
+				return !npc.active; // index should already be valid before submitting, but just in case return the NPC's active status
 
-			// Loop through the npc types of the given index and check if any are currently an active npc
-			foreach (int bossType in BossChecklist.bossTracker.SortedBosses[index].npcIDs) {
-				if (Main.npc.Any(nPC => nPC != npc && nPC.active && nPC.type == bossType))
-					return false;
+			foreach (int npcType in BossChecklist.bossTracker.SortedEntries[index].npcIDs) {
+				if (Main.npc.Any(nPC => nPC != npc && nPC.active && nPC.type == npcType))
+					return false; // if another npc within the same npc pool exists, the entry isn't truly inactive. Reminder: Boss minions should not submitted into NPC pools.
 			}
 
-			// If none of the npc types are active, return the NPC's own active state
-			return !includePassedNPC || !npc.active;
+			if (excludePassedNPC)
+				return true; // If excluding the passed NPC from the active check, this should return true
+
+			return !npc.active; // otherwise, return the NPC's active status
 		}
 
 		/// <summary>
-		/// Uses an entry's custom despawn message logic to determine what string or localization key should be sent.
+		/// Determines what despawn message should be used based on client configuration and submitted entry info.
 		/// </summary>
-		/// <returns>The despawn message of the provided npc.</returns>
+		/// <returns>A string or key of the despawn message of the passed npc. Returns null if no message can be found.</returns>
 		public static string GetDespawnMessage(NPC npc, int index) {
-			if (npc.life <= 0) {
-				return ""; // If the boss was killed, don't display a despawn message
-			}
+			if (npc.life <= 0)
+				return null; // If the boss was killed, don't display a despawn message
 
 			string messageType = BossChecklist.ClientConfig.DespawnMessageType;
-
-			// Provide the npc for the custom message
-			// If null or empty, give a generic message instead of a custom one
 			if (messageType == "Unique") {
-				string customMessage = BossChecklist.bossTracker.SortedBosses[index].customDespawnMessages(npc);
-				if (!string.IsNullOrEmpty(customMessage)) {
-					return customMessage;
-				}
+				// When unique despawn messages are enabled, pass the NPC for the custom message function provided by the entry
+				string customMessage = BossChecklist.bossTracker.SortedEntries[index].customDespawnMessages(npc);
+				if (!string.IsNullOrEmpty(customMessage))
+					return customMessage; // this will only return a unique message if the custom message function properly assigns one
 			}
 
-			// If the Unique message was empty or the player is using Generic despawn messages, try to find an appropriate despawn message to send
-			// Return a generic despawn message is any player is left alive or return a boss victory despawn message if all player's were killed
 			if (messageType != "Disabled") {
-				return Main.player.Any(plr => plr.active && !plr.dead) ? "Mods.BossChecklist.BossDespawn.Generic" : "Mods.BossChecklist.BossVictory.Generic";
+				// If the Unique message was empty/null or the player is using Generic despawn messages, try to find an appropriate despawn message to send
+				// Return a generic despawn message if any player is left alive or return a boss victory despawn message if all player's were killed
+				return Main.player.Any(plr => plr.active && !plr.dead) ? $"{LangChat}.Despawn.Generic" : $"{LangChat}.Loss.Generic";
 			}
 			// The despawn message feature was disabled. Return an empty message.
-			return "";
+			return null;
 		}
 
 		/// <summary>
 		/// Takes the data from record trackers and updates the player's saved records accordingly.
-		/// <para>Only runs in the Singleplayer and Multiplayer netmodes.</para>
+		/// <para>Only runs in the Singleplayer netmode.</para>
 		/// </summary>
-		public void CheckRecords(NPC npc, int bossIndex) {
-			PlayerAssist modPlayer = Main.LocalPlayer.GetModPlayer<PlayerAssist>();
-			int recordIndex = BossChecklist.bossTracker.SortedBosses[bossIndex].GetRecordIndex;
+		private void CheckRecords(NPC npc, int recordIndex) {
+			if (Main.netMode != NetmodeID.SinglePlayer)
+				return;
 
 			// Player must have contributed to the boss fight
-			if (!npc.playerInteraction[Main.myPlayer] || !WorldAssist.Tracker_StartingPlayers[recordIndex][Main.myPlayer]) {
+			if (!npc.playerInteraction[Main.myPlayer] || !WorldAssist.Tracker_StartingPlayers[recordIndex, Main.myPlayer])
 				return;
-			}
 
-			bool newRecordSet = false;
-			RecordID recordType = RecordID.None;
-			ref PersonalStats statistics = ref modPlayer.RecordsForWorld[recordIndex].stats; // Use a ref to properly update records
+			PlayerAssist modPlayer = Main.LocalPlayer.GetModPlayer<PlayerAssist>();
+			PersonalStats statistics = modPlayer.RecordsForWorld[recordIndex].stats;
 			int trackedDuration = modPlayer.Tracker_Duration[recordIndex];
-			int trackedhitsTaken = modPlayer.Tracker_HitsTaken[recordIndex];
+			int trackedHitsTaken = modPlayer.Tracker_HitsTaken[recordIndex];
+			bool newRecordSet = false;
 
 			statistics.kills++; // Kills always go up, since record checking only occurs if boss was defeated
 
+			// If this was the first record made for the boss, set add them to the recordType
+			if (statistics.durationFirst == -1 && statistics.hitsTakenFirst == -1) {
+				statistics.durationFirst = trackedDuration;
+				statistics.hitsTakenFirst = trackedHitsTaken;
+				statistics.playTimeFirst = Main.ActivePlayerFileData.GetPlayTime().Ticks;
+			}
+
 			// Check if the tracked duration was better than the current best OR if the current best has not yet been achieved
+			// Overwrite PrevBest records with the 'current' one first
+			// If the current Best is -1, it was a first record, which means there was no prevBest (logic still works!)
 			statistics.durationPrev = trackedDuration;
 			if (trackedDuration < statistics.durationBest || statistics.durationBest == -1) {
+				statistics.durationPrevBest = statistics.durationBest;
+				statistics.durationBest = trackedDuration;
 				if (statistics.durationBest != -1) {
 					newRecordSet = true; // New Record should not appear above the player on the first record achieved
 				}
-				statistics.durationBest = trackedDuration;
-				recordType |= RecordID.Duration;
 			}
 
 			// Repeat the same logic with the Hits Taken record
-			statistics.hitsTakenPrev = trackedhitsTaken;
-			if (trackedhitsTaken < statistics.hitsTakenBest || statistics.hitsTakenBest == -1) {
+			statistics.hitsTakenPrev = trackedHitsTaken;
+			if (trackedHitsTaken < statistics.hitsTakenBest || statistics.hitsTakenBest == -1) {
+				statistics.hitsTakenPrevBest = statistics.hitsTakenBest;
+				statistics.hitsTakenBest = trackedHitsTaken;
 				if (statistics.hitsTakenBest != -1) {
 					newRecordSet = true;
 				}
-				statistics.hitsTakenBest = trackedhitsTaken;
-				recordType |= RecordID.HitsTaken;
-			}
-
-			if (Main.netMode == NetmodeID.MultiplayerClient) {
-				// Make and send the packet
-				Main.NewText("Sending record packet");
-				ModPacket packet = Mod.GetPacket();
-				packet.Write((byte)PacketMessageType.RecordUpdate);
-				packet.Write(recordIndex); // Which boss record are we changing?
-				modPlayer.RecordsForWorld[recordIndex].stats.NetSend(packet, recordType); // Writes all the variables needed
-				packet.Send(toClient: Main.LocalPlayer.whoAmI); // Server --> Multiplayer client // We send to the player as only they need to see their own records
 			}
 
 			// If a new record was made, notify the player. Again, this will not show for newly set records
 			if (newRecordSet) {
-				modPlayer.hasNewRecord[bossIndex] = true;
+				modPlayer.hasNewRecord[recordIndex] = true;
 				// Compare records to World Records. Players must have beaten their own records to beat a world record
 				string recordSet = CheckWorldRecords(recordIndex) ? "NewWorldRecord" : "NewRecord";
-				string message = Language.GetTextValue("Mods.BossChecklist.BossLog.Terms." + recordSet);
+				string message = Language.GetTextValue($"{BossLogUI.LangLog}.Records.{recordSet}");
 				CombatText.NewText(Main.LocalPlayer.getRect(), Color.LightYellow, message, true);
 			}
 		}
 
-		// TODO: update method to improve what it needs to do
 		/// <summary>
-		/// Takes the record data from all players and updates them where needed.
-		/// <para>Only runs in the Server netmode.</para>
+		/// Compares the updated player record data with the current world records and updating them if the records were beaten.
+		/// <para>Only runs in the Singleplayer netmode.</para>
 		/// </summary>
-		public void CheckRecordsForServer(NPC npc, int bossIndex) {
-			int recordIndex = BossChecklist.bossTracker.SortedBosses[bossIndex].GetRecordIndex;
-			foreach (Player player in Main.player) {
-				// Players must be active AND have interacted with the boss AND cannot have recordingstats disabled
-				if (!player.active || !npc.playerInteraction[player.whoAmI] || !WorldAssist.Tracker_StartingPlayers[recordIndex][player.whoAmI]) {
-					continue;
-				}
+		/// <returns>Whether or not a world record was beaten or matched</returns>
+		private bool CheckWorldRecords(int recordIndex) {
+			if (BossChecklist.DebugConfig.DisableWorldRecords)
+				return false;
 
-				ref PersonalStats serverStatistics = ref BossChecklist.ServerCollectedRecords[player.whoAmI][recordIndex].stats;
-				PlayerAssist modPlayer = player.GetModPlayer<PlayerAssist>();
-				int trackedDuration = modPlayer.Tracker_Duration[recordIndex];
-				int trackedHitsTaken = modPlayer.Tracker_HitsTaken[recordIndex];
-
-				// For each record type we check if its beats the current record or if it is not set already
-				// If it is beaten, we add a flag to recordType to allow the record tracker numbers to override the current record
-				RecordID recordType = RecordID.None;
-
-				serverStatistics.kills++;
-
-				serverStatistics.durationPrev = trackedDuration;
-				if (trackedDuration < serverStatistics.durationBest || serverStatistics.durationBest <= 0) {
-					//Console.WriteLine($"{player.name} set a new record for DURATION: {trackedDuration} (Previous Record: {serverStatistics.durationBest})");
-					recordType |= RecordID.Duration;
-					serverStatistics.durationBest = trackedDuration;
-				}
-
-				serverStatistics.hitsTakenPrev = trackedHitsTaken;
-				if (trackedHitsTaken < serverStatistics.hitsTakenBest || serverStatistics.hitsTakenBest < 0) {
-					//Console.WriteLine($"{player.name} set a new record for HITS TAKEN: {trackedHitsTaken} (Previous Record: {serverStatistics.hitsTakenBest})");
-					recordType |= RecordID.HitsTaken;
-					serverStatistics.hitsTakenBest = trackedHitsTaken;
-				}
-				
-				// Make and send the packet
-				ModPacket packet = Mod.GetPacket();
-				packet.Write((byte)PacketMessageType.RecordUpdate);
-				packet.Write(recordIndex); // Which boss record are we changing?
-				modPlayer.RecordsForWorld[recordIndex].stats.NetSend(packet, recordType); // Writes all the variables needed
-				packet.Send(toClient: player.whoAmI); // Server --> Multiplayer client // We send to the player as only they need to see their own records
-			}
-			/*
-			WorldStats worldRecords = WorldAssist.worldRecords[recordIndex].stats;
-			string[] newRecordHolders = new string[] { "", "" };
-			int[] newWorldRecords = new int[]{
-				worldRecords.durationWorld,
-				worldRecords.hitsTakenWorld
-			};
-			
-			if (newRecordHolders.Any(x => x != "")) {
-				RecordID specificRecord = RecordID.None;
-				if (newRecordHolders[0] != "") {
-					specificRecord |= RecordID.Duration;
-					worldRecords.durationHolder = newRecordHolders[0];
-					worldRecords.durationWorld = newWorldRecords[0];
-				}
-				if (newRecordHolders[1] != "") {
-					specificRecord |= RecordID.HitsTaken;
-					worldRecords.hitsTakenHolder = newRecordHolders[1];
-					worldRecords.hitsTakenWorld = newWorldRecords[1];
-				}
-				
-				ModPacket packet = Mod.GetPacket();
-				packet.Write((byte)PacketMessageType.WorldRecordUpdate);
-				packet.Write(recordIndex); // Which boss record are we changing?
-				worldRecords.NetSend(packet, specificRecord);
-				packet.Send(); // Server --> Server (world data for everyone)
-			}
-			*/
-		}
-
-		// TODO: update method to be compatible with both CheckRecords and CheckRecordsMultiplayer
-		/// <summary>
-		/// Takes the world records with the updated player record data, updating the world records if they were beaten.
-		/// </summary>
-		/// <returns>Whether or not the world record was beaten</returns>
-		public bool CheckWorldRecords(int recordIndex) { // Returns whether or not to stop the New Record! text from appearing to show World Record! instead
 			Player player = Main.LocalPlayer;
 			PersonalStats playerRecord = player.GetModPlayer<PlayerAssist>().RecordsForWorld[recordIndex].stats;
-			WorldStats worldRecord = WorldAssist.worldRecords[recordIndex].stats;
-			bool newRecord = false;
+			WorldStats worldRecords = WorldAssist.worldRecords[recordIndex].stats;
+			bool newWorldRecord = false;
 
-			if (playerRecord.durationBest < worldRecord.durationWorld || worldRecord.durationWorld <= 0) {
-				// only say World Record if you the player is on a server OR if the player wasn't holding the previoes record
-				newRecord = (worldRecord.durationHolder != player.name && worldRecord.durationHolder != "") || Main.netMode == NetmodeID.MultiplayerClient;
-				worldRecord.durationWorld = playerRecord.durationBest;
-				worldRecord.durationHolder = player.name;
+			// World records should NOT update if the world record is empty and the user is in SinglePlayer
+			if (!worldRecords.DurationEmpty && playerRecord.durationBest <= worldRecords.durationWorld) {
+				// If the world record was beaten, clear the list entirely
+				if (playerRecord.durationBest < worldRecords.durationWorld) {
+					worldRecords.durationHolder.Clear(); 
+				}
+				// Add the player name if the list does not contain it
+				if (!worldRecords.durationHolder.Contains(player.name)) {
+					worldRecords.durationHolder.Add(player.name);
+				}
+				worldRecords.durationWorld = playerRecord.durationBest;
+				newWorldRecord = true;
 			}
-			if (playerRecord.hitsTakenBest < worldRecord.hitsTakenWorld || worldRecord.hitsTakenWorld < 0) {
-				newRecord = (worldRecord.hitsTakenHolder != player.name && worldRecord.hitsTakenHolder != "") || Main.netMode == NetmodeID.MultiplayerClient;
-				worldRecord.hitsTakenWorld = playerRecord.hitsTakenBest;
-				worldRecord.hitsTakenHolder = player.name;
+			if (!worldRecords.HitsTakenEmpty && playerRecord.hitsTakenBest <= worldRecords.hitsTakenWorld) {
+				// If the world record was beaten, clear the list entirely
+				if (playerRecord.hitsTakenBest < worldRecords.hitsTakenWorld) {
+					worldRecords.hitsTakenHolder.Clear();
+				}
+				// Add the player name if the list does not contain it
+				if (!worldRecords.hitsTakenHolder.Contains(player.name)) {
+					worldRecords.hitsTakenHolder.Add(player.name);
+				}
+				worldRecords.hitsTakenWorld = playerRecord.hitsTakenBest;
+				newWorldRecord = true;
 			}
-			return newRecord;
+			return newWorldRecord; // Will be used to display CombatTexts of "New Record!" or "New World Record!"
 		}
 
-		// All of BossChecklist's custom downed variables will be handled here
-		public void HandleDownedNPCs(NPC npc) {
-			if ((npc.type == NPCID.DD2DarkMageT1 || npc.type == NPCID.DD2DarkMageT3) && !WorldAssist.downedDarkMage) {
+		/// <summary>
+		/// Handles all of BossChecklist's custom downed variables, makring them as defeated and updating all clients when needed.
+		/// </summary>
+		public void HandleDownedNPCs(int npcType) {
+			if ((npcType == NPCID.DD2DarkMageT1 || npcType == NPCID.DD2DarkMageT3) && !WorldAssist.downedDarkMage) {
 				WorldAssist.downedDarkMage = true;
 				if (Main.netMode == NetmodeID.Server) {
 					NetMessage.SendData(MessageID.WorldData);
 				}
 			}
-			else if ((npc.type == NPCID.DD2OgreT2 || npc.type == NPCID.DD2OgreT3) && !WorldAssist.downedOgre) {
+			else if ((npcType == NPCID.DD2OgreT2 || npcType == NPCID.DD2OgreT3) && !WorldAssist.downedOgre) {
 				WorldAssist.downedOgre = true;
 				if (Main.netMode == NetmodeID.Server) {
 					NetMessage.SendData(MessageID.WorldData);
 				}
 			}
-			else if (npc.type == NPCID.PirateShip && !WorldAssist.downedFlyingDutchman) {
+			else if (npcType == NPCID.PirateShip && !WorldAssist.downedFlyingDutchman) {
 				WorldAssist.downedFlyingDutchman = true;
 				if (Main.netMode == NetmodeID.Server) {
 					NetMessage.SendData(MessageID.WorldData);
 				}
 			}
-			else if (npc.type == NPCID.MartianSaucerCore && !WorldAssist.downedMartianSaucer) {
+			else if (npcType == NPCID.MartianSaucerCore && !WorldAssist.downedMartianSaucer) {
 				WorldAssist.downedMartianSaucer = true;
 				if (Main.netMode == NetmodeID.Server) {
 					NetMessage.SendData(MessageID.WorldData);
@@ -328,17 +294,18 @@ namespace BossChecklist
 			}
 		}
 
-		// Depending on what configs are enabled, this will send messages in chat displaying what NPC has been defeated
+		/// <summary>
+		/// Handles the extra npc defeation messages related to boss limbs and towers.
+		/// These messages will not appear if the related configs are disabled.
+		/// </summary>
 		public void SendEntryMessage(NPC npc) {
 			if (NPCisLimb(npc)) {
 				if (!BossChecklist.ClientConfig.LimbMessages)
 					return;
 
-				string partName = npc.GetFullNetName().ToString();
-				if (npc.type == NPCID.SkeletronHand) {
-					partName = "Skeletron Hand"; // TODO: Localization needed
-				}
-				string defeatedLimb = "Mods.BossChecklist.BossDefeated.Limb";
+				// Skeletron's hands just use Skeletron's name instead of their own, so a custom name is needed
+				string partName = npc.type == NPCID.SkeletronHand ? Lang.GetItemNameValue(ItemID.SkeletronHand) : npc.GetFullNetName().ToString();
+				string defeatedLimb = $"{LangChat}.Defeated.Limb";
 				if (Main.netMode == NetmodeID.SinglePlayer) {
 					Main.NewText(Language.GetTextValue(defeatedLimb, partName), Colors.RarityGreen);
 				}
@@ -349,7 +316,8 @@ namespace BossChecklist
 			else if (npc.type == NPCID.LunarTowerSolar || npc.type == NPCID.LunarTowerVortex || npc.type == NPCID.LunarTowerNebula || npc.type == NPCID.LunarTowerStardust) {
 				if (!BossChecklist.ClientConfig.PillarMessages)
 					return;
-				string defeatedTower = "Mods.BossChecklist.BossDefeated.Tower";
+
+				string defeatedTower = $"{LangChat}.Defeated.Tower";
 				string npcName = npc.GetFullNetName().ToString();
 				if (Main.netMode == NetmodeID.SinglePlayer) {
 					Main.NewText(Language.GetTextValue(defeatedTower, npcName), Colors.RarityPurple);
@@ -360,8 +328,13 @@ namespace BossChecklist
 			}
 		}
 
-		// TODO: Expand on this idea for modded entries?
-		public bool NPCisLimb(NPC npcType) {
+		// This feature will not be extended to modded entries as those mods can handle limb messages themselves with ease, if desired.
+		/// <summary>
+		/// A 'limb' NPC is a part of a boss that is an extension of the boss, such as Skeletron's hands.
+		/// This also considers boss's that are multiple entities, such as the Twins consisting of Retinazer and Spazmatism.
+		/// </summary>
+		/// <returns>Whether or not the npc is considered a 'limb'.</returns>
+		public bool NPCisLimb(NPC npc) {
 			int[] limbNPCs = new int[] {
 				NPCID.PrimeSaw,
 				NPCID.PrimeLaser,
@@ -373,10 +346,10 @@ namespace BossChecklist
 				NPCID.GolemHead
 			};
 
-			bool isTwinsRet = npcType.type == NPCID.Retinazer && Main.npc.Any(x => x.type == NPCID.Spazmatism && x.active);
-			bool isTwinsSpaz = npcType.type == NPCID.Spazmatism && Main.npc.Any(x => x.type == NPCID.Retinazer && x.active);
+			bool isTwinsRet = npc.type == NPCID.Retinazer && Main.npc.Any(x => x.type == NPCID.Spazmatism && x.active);
+			bool isTwinsSpaz = npc.type == NPCID.Spazmatism && Main.npc.Any(x => x.type == NPCID.Retinazer && x.active);
 
-			return limbNPCs.Contains(npcType.type) || isTwinsRet || isTwinsSpaz;
+			return limbNPCs.Contains(npc.type) || isTwinsRet || isTwinsSpaz;
 		}
 	}
 }

@@ -10,7 +10,6 @@ using Terraria.ID;
 using Terraria.Localization;
 using Terraria.ModLoader;
 using Terraria.UI;
-using Terraria.UI.Chat;
 
 namespace BossChecklist
 {
@@ -25,7 +24,7 @@ namespace BossChecklist
 		internal static UserInterface BossRadarUIInterface;
 		internal BossRadarUI BossRadarUI;
 
-		internal List<string> OptedModNames;
+		internal Dictionary<string, int[]> RegisteredMods; // Key: mod internal name, Value: Entries registered by type
 		internal string UIHoverText = "";
 		internal Color UIHoverTextColor = default;
 
@@ -55,7 +54,7 @@ namespace BossChecklist
 				BossRadarUIInterface.SetState(BossRadarUI);
 			}
 
-			OptedModNames = new List<string>();
+			RegisteredMods = new Dictionary<string, int[]>();
 		}
 
 		public override void Unload() {
@@ -65,6 +64,14 @@ namespace BossChecklist
 			BossRadarUI.whitelistNPCs = null;
 			UICheckbox.checkboxTexture = null;
 			UICheckbox.checkmarkTexture = null;
+		}
+
+		public override void AddRecipes() {
+			//bossTracker.FinalizeLocalization();
+			BossChecklist.bossTracker.FinalizeOrphanData(); // Add any remaining boss data, including added NPCs, loot, collectibles and spawn items.
+			BossChecklist.bossTracker.FinalizeEntryLootTables(); // Generate boss loot data. Treasurebag is also determined in this.
+			BossChecklist.bossTracker.FinalizeCollectionTypes(); // Collectible types have to be determined AFTER all items in orphan data has been added.
+			BossChecklist.bossTracker.FinalizeEntryData(); // Finalize all boss data. Entries cannot be further edited beyond this point.
 		}
 
 		public override void UpdateUI(GameTime gameTime) {
@@ -96,51 +103,25 @@ namespace BossChecklist
 
 			int mouseTextIndex = layers.FindIndex(layer => layer.Name.Equals("Vanilla: Mouse Text"));
 			if (mouseTextIndex != -1) {
-				layers.Insert(mouseTextIndex, new LegacyGameInterfaceLayer(
-					"BossChecklist: Boss Checklist",
-					delegate {
-						if (BossChecklistUI.Visible) {
-							bossChecklistInterface?.Draw(Main.spriteBatch, new GameTime());
-
-							if (BossChecklistUI.hoverText != "") {
-								float x = FontAssets.MouseText.Value.MeasureString(BossChecklistUI.hoverText).X;
-								Vector2 vector = new Vector2((float)Main.mouseX, (float)Main.mouseY) + new Vector2(16f, 16f);
-								if (vector.Y > (float)(Main.screenHeight - 30)) {
-									vector.Y = (float)(Main.screenHeight - 30);
-								}
-								if (vector.X > (float)(Main.screenWidth - x - 30)) {
-									vector.X = (float)(Main.screenWidth - x - 30);
-								}
-								//Utils.DrawBorderStringFourWay(Main.spriteBatch, Main.fontMouseText, BossChecklistUI.hoverText,
-								//	vector.X, vector.Y, new Color((int)Main.mouseTextColor, (int)Main.mouseTextColor, (int)Main.mouseTextColor, (int)Main.mouseTextColor), Color.Black, Vector2.Zero, 1f);
-								//	Utils.draw
-
-								//ItemTagHandler.GenerateTag(item)
-								int hoveredSnippet = -1;
-								TextSnippet[] array = ChatManager.ParseMessage(BossChecklistUI.hoverText, Color.White).ToArray();
-								ChatManager.DrawColorCodedStringWithShadow(Main.spriteBatch, FontAssets.MouseText.Value, array,
-									vector, 0f, Vector2.Zero, Vector2.One, out hoveredSnippet/*, -1f, 2f*/);
-
-								if (hoveredSnippet > -1) {
-									array[hoveredSnippet].OnHover();
-									//if (Main.mouseLeft && Main.mouseLeftRelease)
-									//{
-									//	array[hoveredSnippet].OnClick();
-									//}
-								}
-							}
-						}
-						return true;
-					},
-					InterfaceScaleType.UI)
-				);
+				
 			}
 			// This doesn't work perfectly.
 			//if (BossChecklistUI.Visible) {
 			//	layers.RemoveAll(x => LayersToHideWhenChecklistVisible.Contains(x.Name));
 			//}
 			if (mouseTextIndex != -1) {
-				layers.Insert(mouseTextIndex, new LegacyGameInterfaceLayer("BossChecklist: Boss Log UI",
+				layers.Insert(mouseTextIndex, new LegacyGameInterfaceLayer(
+					"BossChecklist: Boss Checklist",
+					delegate {
+						if (BossChecklistUI.Visible) {
+							bossChecklistInterface?.Draw(Main.spriteBatch, new GameTime());
+						}
+						return true;
+					},
+					InterfaceScaleType.UI)
+				);
+
+				layers.Insert(++mouseTextIndex, new LegacyGameInterfaceLayer("BossChecklist: Boss Log UI",
 					delegate {
 						BossLogInterface.Draw(Main.spriteBatch, new GameTime());
 						return true;
@@ -159,10 +140,9 @@ namespace BossChecklist
 				layers.Insert(++mouseTextIndex, new LegacyGameInterfaceLayer("BossChecklist: Custom UI Hover Text",
 					delegate {
 						// Detect if the hover text is a single localization key and draw the hover text accordingly
-						if (UIHoverText != "") {
-							string text = UIHoverText.StartsWith("$Mods.") ? Language.GetTextValue(UIHoverText.Substring(1)) : UIHoverText;
-							BossLogUI.DrawTooltipBG(Main.spriteBatch, text, UIHoverTextColor);
-						}
+						if (!string.IsNullOrEmpty(UIHoverText))
+							DrawTooltipBackground(Language.GetTextValue(UIHoverText), UIHoverTextColor);
+
 						// Reset text and color back to default state
 						UIHoverText = "";
 						UIHoverTextColor = default;
@@ -181,23 +161,24 @@ namespace BossChecklist
 			if (playerChatIndex != -1) {
 				layers.Insert(playerChatIndex, new LegacyGameInterfaceLayer("BossChecklist: Record Tracker Debugger",
 					delegate {
-						// Currently, this debug feature is limited to singleplayer
-						// TODO: Possibly make it functional in MP? No real good use for it as of now.
-						// entered
-						PlayerAssist modPlayer = Main.LocalPlayer.GetModPlayer<PlayerAssist>();
-						if (!modPlayer.TrackersSetup)
+						// Currently, this debug feature is limited to singleplayer as the server does not display its info.
+						if (Main.netMode != NetmodeID.SinglePlayer)
 							return true;
 
-						int configIndex = NPCAssist.GetBossInfoIndex(BossChecklist.DebugConfig.ShowTimerOrCounter.Type, true);
-						if (configIndex == -1)
+						EntryInfo entry = NPCAssist.GetEntryInfo(BossChecklist.DebugConfig.ShowTimerOrCounter.Type);
+						if (entry == null)
 							return true;
 
-						int recordIndex = BossChecklist.bossTracker.SortedBosses[configIndex].GetRecordIndex;
+						int recordIndex = entry.GetRecordIndex;
 						if (recordIndex == -1)
 							return true;
 
+						PlayerAssist modPlayer = Main.LocalPlayer.GetModPlayer<PlayerAssist>();
+						if (modPlayer.Tracker_Duration == null || modPlayer.Tracker_Duration.Length == 0)
+							return true; // fixes a silent error on servers when the trackers have not yet been populated
+						
 						string debugText =
-							$"[#{configIndex}] {BossChecklist.bossTracker.SortedBosses[configIndex].DisplayName} [{recordIndex}]" +
+							$"[#{entry.GetIndex}] {entry.DisplayName} [{recordIndex}]" +
 							$"\nTime: {modPlayer.Tracker_Duration[recordIndex]}" +
 							$"\nTimes Hit: {modPlayer.Tracker_HitsTaken[recordIndex]}" +
 							$"\nDeaths: {modPlayer.Tracker_Deaths[recordIndex]}";
@@ -208,6 +189,31 @@ namespace BossChecklist
 				);
 			}
 			#endregion
+		}
+
+		/// <summary>
+		/// <para>Draws backgrounds for texts similar to the ones used for item tooltips.</para>
+		/// <para>ModifyInterfaceLayers will use this method when hovering over an element that changes the <see cref="UIHoverText"/></para>
+		/// </summary>
+		/// <param name="text"></param>
+		/// <param name="textColor"></param>
+		private void DrawTooltipBackground(string text, Color textColor = default) {
+			if (text == "")
+				return;
+
+			int padd = 20;
+			Vector2 stringVec = FontAssets.MouseText.Value.MeasureString(text);
+			Rectangle bgPos = new Rectangle(Main.mouseX + 20, Main.mouseY + 20, (int)stringVec.X + padd, (int)stringVec.Y + padd - 5);
+			bgPos.X = Utils.Clamp(bgPos.X, 0, Main.screenWidth - bgPos.Width);
+			bgPos.Y = Utils.Clamp(bgPos.Y, 0, Main.screenHeight - bgPos.Height);
+
+			Vector2 textPos = new Vector2(bgPos.X + padd / 2, bgPos.Y + padd / 2);
+			if (textColor == default) {
+				textColor = Main.MouseTextColorReal;
+			}
+
+			Utils.DrawInvBG(Main.spriteBatch, bgPos, new Color(23, 25, 81, 255) * 0.925f);
+			Utils.DrawBorderString(Main.spriteBatch, text, textPos, textColor);
 		}
 	}
 }

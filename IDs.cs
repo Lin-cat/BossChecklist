@@ -22,42 +22,24 @@ namespace BossChecklist
 		Generic,
 		Trophy,
 		Mask,
-		MusicBox,
+		Music,
 		Relic,
 		Pet,
 		Mount
 	}
 
-	internal enum CategoryPage
+	internal enum SubPage
 	{
-		Record,
-		Spawn,
-		Loot
+		Records,
+		SpawnInfo,
+		LootAndCollectibles
 	}
 
-	enum PacketMessageType : byte
-	{
-		RequestHideBoss,
-		RequestClearHidden,
-		SendRecordsToServer,
-		RecordUpdate,
-		WorldRecordUpdate
-	}
-
-	[Flags]
-	internal enum RecordID : int
-	{
-		None = 0,
-		Duration = 1,
-		HitsTaken = 2,
-		ResetAll = 4
-	}
-
-	internal enum RecordType : int
+	internal enum SubCategory
 	{
 		PreviousAttempt,
-		BestRecord,
-		FirstRecord,
+		PersonalBest,
+		FirstVictory,
 		WorldRecord,
 		None
 	}
